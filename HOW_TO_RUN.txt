@@ -1,0 +1,183 @@
+================================================================
+  ZK-KGVerify: How to Run
+================================================================
+
+PAPER TITLE:
+  "ZK-KGVerify: Privacy-Preserving Verification of Knowledge
+   Graph Reasoning using Zero-Knowledge Proofs and Blockchain"
+
+================================================================
+  OPTION A: Run on Google Colab (RECOMMENDED)
+================================================================
+
+1. Go to https://colab.research.google.com
+
+2. Upload the entire project folder to Google Drive:
+   - Upload the folder "new-blockchain-paper" to your Google Drive
+
+3. Open the notebook:
+   - In Colab, click File > Open Notebook > Google Drive
+   - Navigate to: new-blockchain-paper/ZK_KGVerify.ipynb
+
+4. Set GPU runtime:
+   - Click Runtime > Change runtime type > T4 GPU > Save
+
+5. Check PROJECT_PATH in the first code cell:
+   - Default is: /content/drive/MyDrive/new-blockchain-paper
+   - Change it if your folder is in a different location
+
+6. Click Runtime > Run All
+
+7. Wait ~30-40 minutes. All results will be in ./results/
+
+================================================================
+  OPTION B: Run Locally (Python Script)
+================================================================
+
+Prerequisites:
+  - Python 3.8+
+  - NVIDIA GPU with CUDA (optional, CPU works but slower)
+
+Steps:
+
+1. Open terminal in the project folder:
+
+   cd D:\Projects\new-blockchain-paper
+
+2. Create virtual environment (recommended):
+
+   python -m venv venv
+   venv\Scripts\activate        (Windows)
+   source venv/bin/activate     (Linux/Mac)
+
+3. Install dependencies:
+
+   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+   pip install -r requirements.txt
+
+   NOTE: torch-scatter, torch-sparse, torch-geometric are NOT
+   needed. CompGCN and R-GCN use custom implementations.
+
+4. Run the full pipeline:
+
+   python run.py
+
+5. Results will be saved in ./results/
+
+================================================================
+  OPTION C: Run Locally (Jupyter Notebook)
+================================================================
+
+1. Install Jupyter:
+   pip install jupyter
+
+2. Start Jupyter:
+   jupyter notebook
+
+3. Open ZK_KGVerify.ipynb
+
+4. Run all cells (Cell > Run All)
+
+================================================================
+  PROJECT STRUCTURE
+================================================================
+
+new-blockchain-paper/
+  |-- ZK_KGVerify.ipynb      # Main Colab notebook
+  |-- run.py                  # Quick-run Python script
+  |-- requirements.txt        # Python dependencies
+  |-- HOW_TO_RUN.txt          # This file
+  |
+  |-- configs/
+  |     |-- __init__.py       # (required for Python package import)
+  |     |-- config.py         # All hyperparameters (edit here)
+  |
+  |-- src/
+  |     |-- data_loader.py    # FB15k-237 dataset loading
+  |     |-- models.py         # TransE, RotatE, CompGCN, R-GCN
+  |     |-- trainer.py        # Training + evaluation loop
+  |     |-- zkp_module.py     # Pedersen commitments + ZK proofs
+  |     |-- blockchain_module.py  # Local blockchain simulation
+  |     |-- visualization.py  # Paper figures + LaTeX tables
+  |     |-- pipeline.py       # End-to-end orchestration
+  |
+  |-- results/                # Output directory (auto-created)
+  |     |-- training_curves.png
+  |     |-- metrics_comparison.png
+  |     |-- zkp_overhead.png
+  |     |-- blockchain_stats.png
+  |     |-- pipeline_timing.png
+  |     |-- tables.tex        # LaTeX tables (copy to paper)
+  |     |-- all_results.json  # Full numerical results
+  |
+  |-- data/                   # Dataset (auto-downloaded)
+
+================================================================
+  WHAT GETS GENERATED
+================================================================
+
+After running, you get these files in ./results/:
+
+FIGURES (for paper):
+  - training_curves.png     : Loss curves for all 4 models
+  - metrics_comparison.png  : Bar chart of MRR, Hits@1/3/10
+  - zkp_overhead.png        : Proof gen time, size, verify time
+  - blockchain_stats.png    : Gas costs and chain statistics
+  - pipeline_timing.png     : End-to-end timing breakdown
+
+TABLES (for paper):
+  - tables.tex              : LaTeX tables ready to paste into paper
+    - Table 1: Link prediction results
+    - Table 2: ZKP overhead analysis
+    - Table 3: Blockchain storage costs
+
+DATA:
+  - all_results.json        : All numerical results in JSON
+
+================================================================
+  CONFIGURATION (configs/config.py)
+================================================================
+
+Key settings you can adjust:
+
+  EMBEDDING_DIM = 128       # Embedding size (increase for better results)
+  NUM_EPOCHS = 40           # Training epochs (increase for better results)
+  BATCH_SIZE = 1024         # Training batch size
+  NUM_ZKP_SAMPLES = 1000    # Number of ZK proofs to generate
+  BLOCKCHAIN_MODE = "local" # "local" or "ethereum" (local is reliable)
+
+For a quick test run, reduce:
+  NUM_EPOCHS = 5
+  NUM_ZKP_SAMPLES = 100
+
+================================================================
+  TROUBLESHOOTING
+================================================================
+
+Problem: torch-scatter/torch-sparse won't install
+Solution: These are optional. The code has custom GCN layers
+          that don't need them. Just skip those packages.
+
+Problem: CUDA out of memory
+Solution: Reduce BATCH_SIZE to 512 or EMBEDDING_DIM to 64
+          in configs/config.py
+
+Problem: Dataset download fails
+Solution: Manually download FB15k-237 train.txt, valid.txt,
+          test.txt and place in ./data/FB15k-237/
+
+Problem: eth-tester fails on Colab
+Solution: The code auto-falls back to PythonBlockchain.
+          No action needed.
+
+================================================================
+  ESTIMATED RUNTIMES
+================================================================
+
+Hardware          | Time
+------------------+----------
+Colab T4 GPU      | ~30-40 min
+Local GPU (RTX)   | ~20-30 min
+CPU only          | ~1-2 hours
+
+================================================================

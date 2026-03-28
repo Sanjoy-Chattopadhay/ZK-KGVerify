@@ -1,0 +1,47 @@
+\begin{table}[h]
+\centering
+\caption{Link Prediction Results on FB15k-237}
+\label{tab:link_prediction}
+\begin{tabular}{lcccc}
+\hline
+Model & MRR & Hits@1 & Hits@3 & Hits@10 \\
+\hline
+TransE & 0.2054 & 0.1200 & 0.2260 & 0.3800 \\
+RotatE & 0.2790 & 0.1920 & 0.3200 & 0.4480 \\
+CompGCN & 0.3878 & 0.2880 & 0.4300 & 0.6000 \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{ZKP Overhead Analysis}
+\label{tab:zkp_overhead}
+\begin{tabular}{lc}
+\hline
+Metric & Value \\
+\hline
+Avg. Proof Generation Time & 0.96 ms \\
+Avg. Proof Verification Time & 0.46 ms \\
+Avg. Proof Size & 687 bytes \\
+Verification Rate & 0.0\% \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{Blockchain Storage Costs}
+\label{tab:blockchain}
+\begin{tabular}{lc}
+\hline
+Metric & Value \\
+\hline
+Total Transactions & 1000 \\
+Total Gas Used & 38,945,472 \\
+Avg. Gas per TX & 38,945 \\
+Avg. Mining Time & 15.11 ms \\
+Chain Valid & True \\
+\hline
+\end{tabular}
+\end{table}
