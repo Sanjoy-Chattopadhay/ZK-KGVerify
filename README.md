@@ -45,14 +45,6 @@ ZK-KGVerify/
 │   ├── blockchain_stats.png        # Gas costs & chain statistics
 │   └── pipeline_timing.png         # End-to-end timing breakdown
 │
-├── paper/                          # LaTeX paper (IEEE format)
-│   ├── main.tex
-│   ├── references.bib
-│   ├── figures/
-│   └── diagrams/
-│
-├── paper-springer/                 # LaTeX paper (Springer format)
-│
 └── ZK_KGVerify_*.ipynb             # Jupyter notebooks (Colab-ready)
 ```
 
