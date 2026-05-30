@@ -53,7 +53,7 @@ That is the entire trust chain for the blockchain layer of the paper, observable
 🔗 **Verify live:** <https://sepolia.etherscan.io/address/0xdE79F732C74701D168dfdc912a9e42FC8958e56A>
 
 ### Screenshot — deployment transaction
-*(shows: 545,765 gas, contract creation, deployer address)*
+
 
 <!-- SCREENSHOT_2: deployment_tx.png -->
 ![Deployment transaction](docs/screenshots/deployment_tx.png)
@@ -61,7 +61,6 @@ That is the entire trust chain for the blockchain layer of the paper, observable
 🔗 **Verify live:** <https://sepolia.etherscan.io/tx/0xef0027065c000a3cde353c99c3c131e8d07a4297e312aebaa0e76db8347791e2>
 
 ### Screenshot — representative `logVerification` call
-*(shows: decoded input fields — model_id, head/relation/tail, commitment hash, verified=true, proofHash; emitted event)*
 
 <!-- SCREENSHOT_3: log_verification_tx.png -->
 ![Sample logVerification transaction](docs/screenshots/log_verification_tx.png)
@@ -69,7 +68,6 @@ That is the entire trust chain for the blockchain layer of the paper, observable
 🔗 **Verify live:** <https://sepolia.etherscan.io/tx/0x7af5a2810ca7693f693115826108529dea632cf1d2cd393455d1af11f4677688>
 
 ### Screenshot — on-chain audit log
-*(shows: all 30 `VerificationLogged` events in chronological order)*
 
 <!-- SCREENSHOT_4: events_tab.png -->
 ![VerificationLogged events](docs/screenshots/events_tab.png)
