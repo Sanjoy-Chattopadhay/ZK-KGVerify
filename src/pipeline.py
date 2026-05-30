@@ -14,6 +14,7 @@ This is the main orchestration script that runs the full experiment:
 import sys
 import os
 import time
+import random
 import torch
 import numpy as np
 
@@ -21,6 +22,21 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from configs.config import *
+
+
+def _set_global_seed(seed: int) -> None:
+    """Pin every RNG we touch so reruns reproduce reported numbers."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    # Make cudnn deterministic where it matters; small speed cost.
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+_set_global_seed(globals().get("RANDOM_SEED", 42))
 from src.data_loader import FB15k237Dataset, get_data_loaders
 from src.models import get_model
 from src.trainer import train_model, evaluate_model
@@ -234,7 +250,7 @@ def run_full_pipeline():
             model_id=proof.model_id,
             triple=proof.triple,
             prediction_score=proof.score,
-            zkp_commitment=proof.commitment,
+            zkp_commitment=proof.commitment_xy,
             zkp_verified=results[i],
             proof_hash=proof.prediction_hash
         )
