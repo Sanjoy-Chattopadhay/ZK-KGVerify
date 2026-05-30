@@ -199,18 +199,22 @@ Generated artefacts that match the paper figures and tables:
 
 ## Citation
 
-If you use this code, please cite:
+A journal version of this work is under review. While that is in progress,
+please cite the manuscript as:
 
 ```bibtex
-@article{chattopadhyay2026zkkgverify,
-  title  = {ZK-KGVerify: Privacy-Preserving Verification Infrastructure for
-            Knowledge Graph Reasoning in Intelligent Information Systems},
-  author = {Chattopadhyay, Sanjoy and Howlader, Jaydeep},
-  journal = {Information Systems Frontiers},
-  year   = {2026},
-  note   = {Under review}
+@misc{chattopadhyay2026zkkgverify,
+  title        = {{ZK-KGVerify}: Privacy-Preserving Verification Infrastructure
+                  for Knowledge Graph Reasoning in Intelligent Information Systems},
+  author       = {Chattopadhyay, Sanjoy and Howlader, Jaydeep},
+  year         = {2026},
+  howpublished = {Manuscript, National Institute of Technology Durgapur},
+  url          = {https://github.com/Sanjoy-Chattopadhay/ZK-KGVerify}
 }
 ```
+
+This BibTeX entry will be replaced with the formal journal record (with
+DOI) once the paper is accepted and published.
 
 ---
 
