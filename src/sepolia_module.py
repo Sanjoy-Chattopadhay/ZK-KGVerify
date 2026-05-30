@@ -168,6 +168,9 @@ class SepoliaBackend:
         self.contract = None
         self.deployment: Optional[DeploymentInfo] = None
         self.log: List[OnChainTx] = []
+        # Locally tracked next-nonce so we don't refetch from a load-balanced
+        # RPC mid-batch (Alchemy/Infura have multiple nodes that lag by a tx).
+        self._next_nonce: Optional[int] = None
 
         bal_wei = self.w3.eth.get_balance(self.address)
         print(f"[Sepolia] Connected as {self.address}")
@@ -194,12 +197,22 @@ class SepoliaBackend:
         self.bytecode = iface["bin"]
 
     # ---------- deployment ----------
+    def _get_nonce(self) -> int:
+        """Return the next nonce, using a locally tracked counter to avoid
+        load-balanced-RPC staleness. Initialised from the 'pending' tag so
+        any pre-existing pending tx on this account is respected."""
+        if self._next_nonce is None:
+            self._next_nonce = self.w3.eth.get_transaction_count(self.address, "pending")
+        n = self._next_nonce
+        self._next_nonce += 1
+        return n
+
     def deploy(self) -> DeploymentInfo:
         if self.abi is None:
             self._compile()
 
         Contract = self.w3.eth.contract(abi=self.abi, bytecode=self.bytecode)
-        nonce = self.w3.eth.get_transaction_count(self.address)
+        nonce = self._get_nonce()
         gas_price = self.w3.eth.gas_price
 
         tx = Contract.constructor().build_transaction({
@@ -261,7 +274,7 @@ class SepoliaBackend:
         if self.contract is None:
             raise RuntimeError("Contract not deployed/attached. Call deploy() or attach() first.")
 
-        nonce = self.w3.eth.get_transaction_count(self.address)
+        nonce = self._get_nonce()
         gas_price = self.w3.eth.gas_price
 
         score_i = int(round(proof.score * 1_000_000))
@@ -296,7 +309,20 @@ class SepoliaBackend:
         raw = signed.raw_transaction if hasattr(signed, "raw_transaction") else signed.rawTransaction
 
         t0 = time.time()
-        tx_hash = self.w3.eth.send_raw_transaction(raw)
+        try:
+            tx_hash = self.w3.eth.send_raw_transaction(raw)
+        except Exception as e:
+            # Most common cause: load-balanced RPC node lag desyncs the nonce.
+            # Resync from 'pending' once and rebuild the tx with the fresh nonce.
+            if "nonce" not in str(e).lower():
+                raise
+            print(f"  [resync] nonce error ({e}); refetching from 'pending'...")
+            self._next_nonce = self.w3.eth.get_transaction_count(self.address, "pending")
+            nonce = self._get_nonce()
+            tx["nonce"] = nonce
+            signed = self.account.sign_transaction(tx)
+            raw = signed.raw_transaction if hasattr(signed, "raw_transaction") else signed.rawTransaction
+            tx_hash = self.w3.eth.send_raw_transaction(raw)
         receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
         latency = time.time() - t0
         cost = receipt.gasUsed * receipt.effectiveGasPrice

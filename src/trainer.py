@@ -77,6 +77,14 @@ def train_model(model, train_loader, dataset, config, device="cpu"):
     history = {"loss": [], "epoch_time": []}
     total_start = time.time()
 
+    # Early-stopping bookkeeping (config flags optional; safe defaults applied).
+    es_enabled    = bool(getattr(config, "EARLY_STOPPING", False))
+    es_patience   = int(getattr(config, "EARLY_STOP_PATIENCE", 20))
+    es_min_delta  = float(getattr(config, "EARLY_STOP_MIN_DELTA", 1e-3))
+    es_min_epochs = int(getattr(config, "EARLY_STOP_MIN_EPOCHS", 30))
+    best_loss = float("inf")
+    epochs_without_improvement = 0
+
     for epoch in range(config.NUM_EPOCHS):
         model.train()
         epoch_loss = 0.0
@@ -102,9 +110,28 @@ def train_model(model, train_loader, dataset, config, device="cpu"):
         if (epoch + 1) % 10 == 0 or epoch == 0:
             print(f"  Epoch {epoch+1}/{config.NUM_EPOCHS} - Loss: {avg_loss:.4f} - Time: {epoch_time:.2f}s")
 
+        # Early stopping: count how many consecutive epochs have failed to
+        # improve best_loss by at least es_min_delta. Only check after the
+        # min-epochs warm-up so we don't kill RotatE/CompGCN during ramp.
+        if es_enabled and (epoch + 1) >= es_min_epochs:
+            if best_loss - avg_loss > es_min_delta:
+                best_loss = avg_loss
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement >= es_patience:
+                    print(f"  [early stop] no improvement >= {es_min_delta} "
+                          f"for {es_patience} epochs (best={best_loss:.4f}); "
+                          f"stopping at epoch {epoch+1}/{config.NUM_EPOCHS}")
+                    break
+        else:
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+
     total_time = time.time() - total_start
     history["total_time"] = total_time
-    print(f"  Training completed in {total_time:.2f}s")
+    history["epochs_run"] = len(history["loss"])
+    print(f"  Training completed in {total_time:.2f}s ({history['epochs_run']} epochs)")
 
     return history
 

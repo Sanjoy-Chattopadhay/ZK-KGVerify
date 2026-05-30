@@ -13,6 +13,7 @@ This is the main orchestration script that runs the full experiment:
 
 import sys
 import os
+import json
 import time
 import random
 import torch
@@ -22,6 +23,50 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from configs.config import *
+
+
+# ============================================================
+# Checkpoint helpers -- survive Colab disconnects when CHECKPOINT_DIR
+# points at a Drive-backed path.
+# ============================================================
+
+def _ckpt_paths(model_name: str):
+    """Return (weights_pt, metrics_json, history_json) paths for a model."""
+    base = os.path.join(CHECKPOINT_DIR, model_name)
+    return base + ".pt", base + "_metrics.json", base + "_history.json"
+
+
+def _save_model_checkpoint(model_name: str, model, metrics: dict, history: dict) -> None:
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    pt_path, m_path, h_path = _ckpt_paths(model_name)
+    torch.save(model.state_dict(), pt_path)
+    with open(m_path, "w") as f:
+        json.dump(metrics, f, indent=2, default=str)
+    with open(h_path, "w") as f:
+        json.dump(history, f, indent=2, default=str)
+    print(f"  [checkpoint] saved {model_name} -> {pt_path}")
+
+
+def _try_load_model_checkpoint(model_name: str, model):
+    """Return (metrics, history) if a usable checkpoint exists for this model,
+    otherwise (None, None). Loads weights into `model` in-place on success."""
+    if not getattr(sys.modules[__name__], "RESUME", True):
+        return None, None
+    pt_path, m_path, h_path = _ckpt_paths(model_name)
+    if not (os.path.exists(pt_path) and os.path.exists(m_path) and os.path.exists(h_path)):
+        return None, None
+    try:
+        state = torch.load(pt_path, map_location="cpu")
+        model.load_state_dict(state)
+        with open(m_path) as f:
+            metrics = json.load(f)
+        with open(h_path) as f:
+            history = json.load(f)
+        print(f"  [resume] loaded {model_name} from {pt_path}")
+        return metrics, history
+    except Exception as e:
+        print(f"  [resume] checkpoint for {model_name} unreadable ({e}); will retrain.")
+        return None, None
 
 
 def _set_global_seed(seed: int) -> None:
@@ -111,16 +156,36 @@ def run_full_pipeline():
             margin=MARGIN
         )
 
-        # Train
-        history = train_model(model, train_loader, dataset, config_module, device=DEVICE)
+        # GCN models need the train graph attached before forward passes work.
+        if hasattr(model, 'set_graph'):
+            edge_index = dataset.train_triples[:, [0, 2]].t().to(DEVICE)
+            edge_type = dataset.train_triples[:, 1].to(DEVICE)
+            model.set_graph(edge_index, edge_type)
+            model = model.to(DEVICE)
+
+        # Try resuming from a saved checkpoint first.
+        cached_metrics, cached_history = _try_load_model_checkpoint(model_name, model)
+
+        if cached_metrics is not None and cached_history is not None:
+            history = cached_history
+            metrics = cached_metrics
+            print(f"  [resume] skipping train+eval for {model_name} "
+                  f"(MRR={metrics.get('MRR', 0):.4f})")
+        else:
+            # Train
+            history = train_model(model, train_loader, dataset, config_module, device=DEVICE)
+            all_histories[model_name] = history  # keep partial progress visible
+
+            # Evaluate
+            print(f"  Evaluating {model_name}...")
+            eval_max = getattr(config_module, 'EVAL_MAX', None)
+            metrics = evaluate_model(model, dataset, config_module, device=DEVICE, max_eval=eval_max)
+
+            # Persist immediately so a later disconnect doesn't waste this work.
+            _save_model_checkpoint(model_name, model, metrics, history)
+
         all_histories[model_name] = history
-
-        # Evaluate
-        print(f"  Evaluating {model_name}...")
-        eval_max = getattr(config_module, 'EVAL_MAX', None)
-        metrics = evaluate_model(model, dataset, config_module, device=DEVICE, max_eval=eval_max)
         all_metrics[model_name] = metrics
-
         trained_models[model_name] = model
 
     pipeline_times["2-3. Training + Evaluation"] = time.time() - step_start
