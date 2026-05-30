@@ -1,0 +1,259 @@
+{
+  "summary": {
+    "network": "sepolia",
+    "chain_id": 11155111,
+    "contract_address": "0xdE79F732C74701D168dfdc912a9e42FC8958e56A",
+    "deployment": null,
+    "num_tx": 15,
+    "total_gas_used": 3554259,
+    "avg_gas_per_tx": 236950.6,
+    "min_gas_per_tx": 236801,
+    "max_gas_per_tx": 237161,
+    "total_cost_wei": 18783166224149908,
+    "total_cost_eth": 0.018783166224149907,
+    "avg_cost_per_tx_eth": 0.001252211081609993,
+    "avg_latency_s": 11.155409129460653
+  },
+  "transactions": [
+    {
+      "record_id": 0,
+      "tx_hash": "7d1666aed603834be81bb8cd68001a015cd27cb0bdad94c49e415182af7b1500",
+      "block_number": 10952315,
+      "gas_used": 236813,
+      "effective_gas_price_wei": 4851636328,
+      "cost_wei": 1148930553742664,
+      "latency_s": 4.228507041931152,
+      "verified": true,
+      "triple": [
+        12342,
+        92,
+        4857
+      ],
+      "model_id": "CompGCN"
+    },
+    {
+      "record_id": 1,
+      "tx_hash": "7af5a2810ca7693f693115826108529dea632cf1d2cd393455d1af11f4677688",
+      "block_number": 10952316,
+      "gas_used": 236813,
+      "effective_gas_price_wei": 4803732801,
+      "cost_wei": 1137586375803213,
+      "latency_s": 11.685067892074585,
+      "verified": true,
+      "triple": [
+        3947,
+        209,
+        10651
+      ],
+      "model_id": "CompGCN"
+    },
+    {
+      "record_id": 2,
+      "tx_hash": "6f0af3c1c2238fd3392354b76d8a47bd5964bfdacd8e1f6d362a8c411f6f349b",
+      "block_number": 10952317,
+      "gas_used": 237161,
+      "effective_gas_price_wei": 4847642066,
+      "cost_wei": 1149671640014626,
+      "latency_s": 11.906096696853638,
+      "verified": true,
+      "triple": [
+        10295,
+        113,
+        11072
+      ],
+      "model_id": "CompGCN"
+    },
+    {
+      "record_id": 3,
+      "tx_hash": "062c62b359903a41fa109b62895d8010b53ca2c51a737a0d19d63f8d271b1e3f",
+      "block_number": 10952318,
+      "gas_used": 236813,
+      "effective_gas_price_wei": 4910366277,
+      "cost_wei": 1162838569155201,
+      "latency_s": 11.449683904647827,
+      "verified": true,
+      "triple": [
+        4033,
+        46,
+        841
+      ],
+      "model_id": "CompGCN"
+    },
+    {
+      "record_id": 4,
+      "tx_hash": "f89d778d70fcf622d9741ffc1a9c24fbb3fd0999932bad7e54c57b3dff8b250b",
+      "block_number": 10952319,
+      "gas_used": 236813,
+      "effective_gas_price_wei": 4933850201,
+      "cost_wei": 1168399867649413,
+      "latency_s": 12.033300161361694,
+      "verified": true,
+      "triple": [
+        4140,
+        121,
+        3119
+      ],
+      "model_id": "CompGCN"
+    },
+    {
+      "record_id": 5,
+      "tx_hash": "4064cbdc5888807cdb35e0a1740ce7129e24a0ffd95ab03bc8ddcf7598e0f207",
+      "block_number": 10952320,
+      "gas_used": 236801,
+      "effective_gas_price_wei": 5108535955,
+      "cost_wei": 1209706422679955,
+      "latency_s": 11.137995481491089,
+      "verified": true,
+      "triple": [
+        11165,
+        221,
+        92
+      ],
+      "model_id": "CompGCN"
+    },
+    {
+      "record_id": 6,
+      "tx_hash": "57bf5ea810a3e7f60bcf2c73cf6aa8b2bdc66fbed28f3e8ea39487a47735fe83",
+      "block_number": 10952321,
+      "gas_used": 236813,
+      "effective_gas_price_wei": 5111813317,
+      "cost_wei": 1210543847038721,
+      "latency_s": 11.923894166946411,
+      "verified": true,
+      "triple": [
+        13457,
+        167,
+        5353
+      ],
+      "model_id": "CompGCN"
+    },
+    {
+      "record_id": 7,
+      "tx_hash": "452b4a30d9e10417540eab1a910ea4624f35a26094ee86fc4d72c2b1f2721fdd",
+      "block_number": 10952322,
+      "gas_used": 236801,
+      "effective_gas_price_wei": 5279138244,
+      "cost_wei": 1250105215317444,
+      "latency_s": 11.950505018234253,
+      "verified": true,
+      "triple": [
+        1463,
+        8,
+        242
+      ],
+      "model_id": "CompGCN"
+    },
+    {
+      "record_id": 8,
+      "tx_hash": "1429c5575d4ff1bad3fb979528308452c1551abb7964a3724a8d454ab3383fb1",
+      "block_number": 10952323,
+      "gas_used": 237161,
+      "effective_gas_price_wei": 5326523315,
+      "cost_wei": 1263243595908715,
+      "latency_s": 11.244298696517944,
+      "verified": true,
+      "triple": [
+        12060,
+        106,
+        5488
+      ],
+      "model_id": "CompGCN"
+    },
+    {
+      "record_id": 9,
+      "tx_hash": "a51e13ea361af2e884866ddedc68eb3536ae933603278f9b99d3790111c02f87",
+      "block_number": 10952324,
+      "gas_used": 237161,
+      "effective_gas_price_wei": 5446994386,
+      "cost_wei": 1291814635578146,
+      "latency_s": 12.162539958953857,
+      "verified": true,
+      "triple": [
+        7945,
+        90,
+        6871
+      ],
+      "model_id": "CompGCN"
+    },
+    {
+      "record_id": 10,
+      "tx_hash": "0800e6f2177f3986d5688017e4a406ca17dffd061ea35f9d63afe6b567b58297",
+      "block_number": 10952325,
+      "gas_used": 237161,
+      "effective_gas_price_wei": 5674750763,
+      "cost_wei": 1345829565703843,
+      "latency_s": 10.949617862701416,
+      "verified": true,
+      "triple": [
+        11215,
+        131,
+        13851
+      ],
+      "model_id": "CompGCN"
+    },
+    {
+      "record_id": 11,
+      "tx_hash": "6bfd1491a438971a47e3266a11695d3953a0aacc424d37494a3b55b51b4b05a7",
+      "block_number": 10952326,
+      "gas_used": 237161,
+      "effective_gas_price_wei": 5718351268,
+      "cost_wei": 1356169905070148,
+      "latency_s": 11.704563856124878,
+      "verified": true,
+      "triple": [
+        3550,
+        227,
+        11054
+      ],
+      "model_id": "CompGCN"
+    },
+    {
+      "record_id": 12,
+      "tx_hash": "eb3c1f81adaf153a24b12d9659d1478d32e3d69718f60ed6483cec56a0977699",
+      "block_number": 10952327,
+      "gas_used": 237161,
+      "effective_gas_price_wei": 5743031909,
+      "cost_wei": 1362023190570349,
+      "latency_s": 11.879769325256348,
+      "verified": true,
+      "triple": [
+        11510,
+        65,
+        4025
+      ],
+      "model_id": "CompGCN"
+    },
+    {
+      "record_id": 13,
+      "tx_hash": "5db83baeb2862e6e327d8fd9846370da65220f7095c5ec11cd377f32e8f84124",
+      "block_number": 10952328,
+      "gas_used": 236813,
+      "effective_gas_price_wei": 5620842067,
+      "cost_wei": 1331088472412471,
+      "latency_s": 11.50835108757019,
+      "verified": true,
+      "triple": [
+        6922,
+        217,
+        3494
+      ],
+      "model_id": "CompGCN"
+    },
+    {
+      "record_id": 14,
+      "tx_hash": "d9a2cf7b0f1ef1f89ef6765760a91fa31f50e420bca3acdfdc9f59f3178b41e8",
+      "block_number": 10952329,
+      "gas_used": 236813,
+      "effective_gas_price_wei": 5891629123,
+      "cost_wei": 1395214367504999,
+      "latency_s": 11.566945791244507,
+      "verified": true,
+      "triple": [
+        427,
+        157,
+        5834
+      ],
+      "model_id": "CompGCN"
+    }
+  ]
+}
