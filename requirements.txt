@@ -6,13 +6,13 @@ seaborn>=0.12.0
 tqdm>=4.65.0
 scikit-learn>=1.3.0
 
-# Optional — only needed for EthereumSimulator mode (not required for default 'local' mode)
-# web3>=6.0.0
-# eth-tester[py-evm]>=0.9.0
-# py-solc-x>=2.0.0
+# Real BN128 elliptic curve crypto for the ZKP layer
+py_ecc>=6.0.0
 
-# Optional — only needed if models use PyG message passing (current code does NOT require these)
-# torch-geometric>=2.4.0
-# torch-scatter
-# torch-sparse
-# py_ecc>=6.0.0
+# Sepolia / on-chain deployment & logging
+web3>=6.0.0
+eth-account>=0.10.0
+py-solc-x>=2.0.0
+
+# Optional — only needed for offline EthereumSimulator backend
+# eth-tester[py-evm]>=0.9.0

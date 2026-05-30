@@ -20,8 +20,11 @@ MODELS = ["TransE", "RotatE", "CompGCN"]
 
 # Evaluation
 EVAL_BATCH_SIZE = 256
-EVAL_MAX = None  # None = evaluate on full test set (20,466 triples)
+EVAL_MAX = None  # None = full test set (20,466 triples). Override to a small int for smoke tests.
 METRICS = ["MRR", "Hits@1", "Hits@3", "Hits@10"]
+
+# Reproducibility -- pinned across torch / numpy / Python random and CUDA.
+RANDOM_SEED = 42
 
 # ZKP
 NUM_ZKP_SAMPLES = 1000  # Number of predictions to generate proofs for

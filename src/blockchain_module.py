@@ -107,7 +107,7 @@ class PythonBlockchain:
         model_id: str,
         triple: tuple,
         prediction_score: float,
-        zkp_commitment: int,
+        zkp_commitment,           # int or (x, y) tuple of BN128 EC point
         zkp_verified: bool,
         proof_hash: str
     ) -> Transaction:
@@ -115,12 +115,22 @@ class PythonBlockchain:
         Add a ZKP verification record to the blockchain.
         Returns the transaction object with gas costs.
         """
+        # Normalise EC-point commitments (BN128 affine (x, y)) to a 32-byte digest
+        # so the gas accounting matches what a real Solidity contract would store.
+        if isinstance(zkp_commitment, (tuple, list)) and len(zkp_commitment) == 2:
+            commitment_str = hashlib.sha256(
+                zkp_commitment[0].to_bytes(32, "big")
+                + zkp_commitment[1].to_bytes(32, "big")
+            ).hexdigest()
+        else:
+            commitment_str = str(zkp_commitment)[:64]
+
         # Calculate gas cost
         data_size = len(json.dumps({
             "model_id": model_id,
             "triple": triple,
             "score": prediction_score,
-            "commitment": str(zkp_commitment)[:64],
+            "commitment": commitment_str,
             "verified": zkp_verified,
             "proof_hash": proof_hash
         }).encode())
@@ -132,7 +142,7 @@ class PythonBlockchain:
             "model_id": model_id,
             "triple": list(triple),
             "prediction_score": prediction_score,
-            "zkp_commitment": str(zkp_commitment)[:64],  # Truncate for storage
+            "zkp_commitment": commitment_str,  # 64-hex SHA-256 of EC point or truncated int
             "zkp_verified": zkp_verified,
             "proof_hash": proof_hash,
             "gas_used": gas_used,

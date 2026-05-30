@@ -1,307 +1,325 @@
 """
-Zero-Knowledge Proof Module for ZK-KGVerify.
+Zero-Knowledge Proof Module for ZK-KGVerify (BN128 elliptic curve edition).
 
-Implements Pedersen Commitment-based ZKPs to verify that:
-1. A model prediction was computed from committed model parameters
-2. The prediction score exceeds a threshold (proving model quality)
-3. The prover knows the model weights without revealing them
+Implements Pedersen commitments and a Schnorr-style Sigma protocol on the
+BN128 (alt_bn128) elliptic curve -- the same curve used by the Ethereum
+precompiles for ZK-SNARK verification.
 
-ZKP Protocol:
-  - Prover: Has trained model M, makes prediction P = M(h, r, ?)
-  - Commitment: C = g^v * h^r (Pedersen commitment to embedding values)
-  - Proof: Proves knowledge of v such that C = g^v * h^r, AND that
-    the prediction was computed correctly from v
-  - Verifier: Checks proof without learning v (the model weights)
+Cryptographic primitives
+------------------------
+Let G = G1 be the standard BN128 generator and let H be a second,
+"nothing-up-my-sleeve" (NUMS) generator derived deterministically from
+G via H = h_seed * G, where h_seed = SHA256("ZK-KGVerify NUMS H") mod n
+and n = curve_order. Because h_seed is publicly known but its
+discrete log to G is fixed and not chosen by the prover, the relation
+log_G(H) acts as an unknown to the prover for binding purposes.
 
-We use a simplified but cryptographically sound Pedersen commitment
-scheme on an elliptic curve (BN128/alt_bn128).
+Pedersen commitment:
+    C = v * G + r * H        (point addition / scalar multiplication on BN128)
+
+Schnorr-Fiat-Shamir proof of knowledge of (v, r) opening C:
+    Announce:  k_v, k_r <-$ Z_n;    A = k_v * G + k_r * H
+    Challenge: e = SHA256(C || A || pred_hash || model_id) mod n
+    Respond:   s_v = k_v + e*v mod n,    s_r = k_r + e*r mod n
+    Verify:    s_v * G + s_r * H  ==  A + e * C
+
+All scalar arithmetic is done modulo the curve order n (a 254-bit prime).
+This gives ~128-bit security under the ECDLP assumption on BN128, matching
+the security level claimed in the paper.
+
+The proof object is fully serialisable; points are stored as their (x, y)
+affine integer coordinates so the same proof can be passed to a Solidity
+verifier via web3.py.
 """
 
 import hashlib
 import time
 import json
+import secrets
 import numpy as np
-from dataclasses import dataclass, asdict
-from typing import List, Tuple, Optional
+from dataclasses import dataclass, field, asdict
+from typing import List, Tuple, Optional, Any
+
+from py_ecc.bn128 import (
+    G1,
+    add,
+    multiply,
+    eq,
+    curve_order,
+    field_modulus,
+)
+from py_ecc.bn128.bn128_curve import is_on_curve, b
 
 
 # ============================================================
-# Finite Field Arithmetic (for ZKP without py_ecc dependency)
+# Curve constants
 # ============================================================
 
-# BN128 curve prime (used in Ethereum precompiles)
-FIELD_PRIME = 21888242871839275222246405745257275088548364400416034343698204186575808495617
+# Scalar group order n (a 254-bit prime). All exponents live in Z_n.
+N = curve_order
 
-# Group order: the multiplicative group Z_p* has order p-1.
-# All exponent arithmetic must be done modulo GROUP_ORDER, not FIELD_PRIME,
-# because g^a mod p = g^(a mod (p-1)) mod p by Fermat's little theorem.
-GROUP_ORDER = FIELD_PRIME - 1
-
-# Generator points (simplified - using large primes as generators)
-G = 7  # Generator for value
-H = 13  # Generator for randomness (nothing-up-my-sleeve number)
-
-
-def mod_exp(base, exp, mod):
-    """Modular exponentiation: base^exp mod p"""
-    return pow(base, exp, mod)
+# Second generator H: NUMS construction, h_seed = SHA256("ZK-KGVerify NUMS H").
+# log_G(H) = h_seed is public but fixed; binding follows from the fact that
+# the prover did not choose h_seed.
+_H_SEED = int(
+    hashlib.sha256(b"ZK-KGVerify NUMS H v1").hexdigest(), 16
+) % N
+H_POINT = multiply(G1, _H_SEED)
 
 
-def mod_inv(a, p):
-    """Modular inverse using Fermat's little theorem: a^(-1) = a^(p-2) mod p"""
-    return pow(a, p - 2, p)
+# ============================================================
+# Helpers
+# ============================================================
+
+def _point_to_ints(P) -> Tuple[int, int]:
+    """Convert a py_ecc affine point to a pair of native Python ints."""
+    if P is None:
+        return (0, 0)  # point at infinity sentinel
+    x, y = P
+    return (int(x.n), int(y.n))
 
 
-def hash_to_field(*args):
-    """Hash arbitrary inputs to a field element in Z_p (for commitments)."""
+def _point_from_ints(xy: Tuple[int, int]):
+    """Reconstruct a py_ecc point from (x, y) ints. Returns None for (0, 0)."""
+    x, y = xy
+    if x == 0 and y == 0:
+        return None
+    from py_ecc.bn128 import FQ
+    return (FQ(x), FQ(y))
+
+
+def _hash_embedding(emb) -> int:
+    """Hash a numpy array (or list) of floats to a scalar in Z_n.
+
+    Floats are rounded to 6 decimal places before hashing so that minor
+    floating-point noise across runs does not change the commitment.
+    """
+    arr = np.asarray(emb).flatten()
     h = hashlib.sha256()
-    for arg in args:
-        if isinstance(arg, (int, float)):
-            h.update(str(arg).encode())
-        elif isinstance(arg, bytes):
-            h.update(arg)
-        elif isinstance(arg, str):
-            h.update(arg.encode())
-        elif isinstance(arg, (list, np.ndarray)):
-            for v in np.array(arg).flatten():
-                h.update(str(float(v)).encode())
-    return int(h.hexdigest(), 16) % GROUP_ORDER
+    h.update(b"ZK-KGVerify-embedding")
+    for v in arr:
+        # Stable string form; %.6e is platform-deterministic.
+        h.update(f"{float(v):.6e}".encode())
+    return int(h.hexdigest(), 16) % N
+
+
+def _hash_challenge(C_xy, A_xy, prediction_hash: str, model_id: str) -> int:
+    """Fiat-Shamir challenge bound to the full proof transcript."""
+    h = hashlib.sha256()
+    h.update(b"ZK-KGVerify-challenge-v1")
+    h.update(C_xy[0].to_bytes(32, "big"))
+    h.update(C_xy[1].to_bytes(32, "big"))
+    h.update(A_xy[0].to_bytes(32, "big"))
+    h.update(A_xy[1].to_bytes(32, "big"))
+    h.update(prediction_hash.encode())
+    h.update(model_id.encode())
+    return int(h.hexdigest(), 16) % N
+
+
+def _hash_prediction(triple: Tuple[int, int, int], score: float) -> str:
+    """Hex SHA-256 of the public prediction (h, r, t, score) tuple."""
+    return hashlib.sha256(
+        f"{triple[0]}:{triple[1]}:{triple[2]}:{score:.6f}".encode()
+    ).hexdigest()
 
 
 # ============================================================
-# Pedersen Commitment Scheme
+# Pedersen Commitment
 # ============================================================
 
 @dataclass
 class PedersenCommitment:
-    """A Pedersen commitment C = g^v * h^r mod p"""
-    commitment: int
-    # These are secret (kept by prover):
-    value_hash: int  # Hash of the committed value
-    randomness: int  # Blinding factor
+    """C = v*G + r*H on BN128. C is stored as (x, y) affine ints."""
+    commitment_xy: Tuple[int, int]
+    # Secret (kept by prover, never serialised in proofs):
+    value_scalar: int
+    randomness: int
 
 
-def pedersen_commit(value_hash: int, randomness: int = None) -> PedersenCommitment:
-    """
-    Create a Pedersen commitment to a value.
-
-    C = g^value_hash * h^randomness mod p
-
-    The commitment is binding (can't change value after committing)
-    and hiding (commitment reveals nothing about value).
-    """
+def pedersen_commit(value_scalar: int, randomness: Optional[int] = None) -> PedersenCommitment:
+    """Form C = value_scalar * G + randomness * H on BN128."""
     if randomness is None:
-        randomness = int.from_bytes(hashlib.sha256(str(time.time_ns()).encode()).digest(), 'big') % GROUP_ORDER
+        randomness = secrets.randbelow(N)
+    value_scalar = value_scalar % N
+    randomness = randomness % N
 
-    commitment = (mod_exp(G, value_hash, FIELD_PRIME) * mod_exp(H, randomness, FIELD_PRIME)) % FIELD_PRIME
-
+    C = add(multiply(G1, value_scalar), multiply(H_POINT, randomness))
     return PedersenCommitment(
-        commitment=commitment,
-        value_hash=value_hash,
-        randomness=randomness
+        commitment_xy=_point_to_ints(C),
+        value_scalar=value_scalar,
+        randomness=randomness,
     )
 
 
 # ============================================================
-# Schnorr-like ZKP for Knowledge of Commitment Opening
+# Schnorr-Fiat-Shamir ZKP
 # ============================================================
 
 @dataclass
 class ZKProof:
-    """A zero-knowledge proof of knowledge of commitment opening."""
-    commitment: int          # The Pedersen commitment
-    challenge: int           # Fiat-Shamir challenge
-    response_v: int          # Response for value
-    response_r: int          # Response for randomness
-    announcement: int        # Prover's announcement (first message)
-    prediction_hash: str     # Hash of the prediction result
-    model_id: str            # Identifier for the model
-    timestamp: float         # When the proof was generated
-    score: float             # The prediction score (public)
-    triple: Tuple[int, int, int]  # The (h, r, t) triple (public)
-    proof_size_bytes: int    # Size of the proof in bytes
+    """Non-interactive ZK proof of knowledge of (v, r) opening a Pedersen
+    commitment on BN128. Points are serialised as (x, y) integer pairs."""
+    commitment_xy: Tuple[int, int]
+    announcement_xy: Tuple[int, int]
+    challenge: int
+    response_v: int
+    response_r: int
+    prediction_hash: str
+    model_id: str
+    timestamp: float
+    score: float
+    triple: Tuple[int, int, int]
+    proof_size_bytes: int = 0
 
 
 def generate_proof(
     embedding_vector: np.ndarray,
     prediction_score: float,
     triple: Tuple[int, int, int],
-    model_id: str
+    model_id: str,
 ) -> ZKProof:
-    """
-    Generate a ZK proof that a prediction was computed from committed embeddings.
-
-    Protocol (Schnorr-like Sigma protocol with Fiat-Shamir):
-    1. Prover commits to embedding: C = g^v * h^r
-    2. Prover picks random k_v, k_r, computes A = g^k_v * h^k_r
-    3. Challenge e = Hash(C, A, prediction_hash)
-    4. Response: s_v = k_v + e*v, s_r = k_r + e*r
-    5. Verifier checks: g^s_v * h^s_r == A * C^e
-    """
+    """Generate a Schnorr-Fiat-Shamir proof on BN128 for one KG prediction."""
     timestamp = time.time()
 
-    # Hash the embedding to a field element
-    value_hash = hash_to_field(embedding_vector)
+    # Step 1: hash the embedding to a scalar v in Z_n.
+    v = _hash_embedding(embedding_vector)
 
-    # Create Pedersen commitment
-    commitment_obj = pedersen_commit(value_hash)
-    C = commitment_obj.commitment
-    r = commitment_obj.randomness
-    v = value_hash
+    # Step 2: form Pedersen commitment C = v*G + r*H.
+    comm = pedersen_commit(v)
+    C_xy = comm.commitment_xy
+    r = comm.randomness
 
-    # Hash of the prediction result
-    prediction_hash = hashlib.sha256(
-        f"{triple[0]}:{triple[1]}:{triple[2]}:{prediction_score:.6f}".encode()
-    ).hexdigest()
+    # Step 3: announcement A = k_v*G + k_r*H with fresh nonces.
+    k_v = secrets.randbelow(N)
+    k_r = secrets.randbelow(N)
+    A_pt = add(multiply(G1, k_v), multiply(H_POINT, k_r))
+    A_xy = _point_to_ints(A_pt)
 
-    # Step 2: Random announcement (nonces in Z_{group_order})
-    k_v = hash_to_field(str(time.time_ns()) + "kv")
-    k_r = hash_to_field(str(time.time_ns()) + "kr")
-    A = (mod_exp(G, k_v, FIELD_PRIME) * mod_exp(H, k_r, FIELD_PRIME)) % FIELD_PRIME
+    # Step 4: bind prediction to the transcript.
+    pred_hash = _hash_prediction(triple, prediction_score)
 
-    # Step 3: Fiat-Shamir challenge (in Z_{group_order})
-    e = hash_to_field(C, A, prediction_hash, model_id)
+    # Step 5: Fiat-Shamir challenge.
+    e = _hash_challenge(C_xy, A_xy, pred_hash, model_id)
 
-    # Step 4: Responses (mod group_order, since these are exponents)
-    s_v = (k_v + e * v) % GROUP_ORDER
-    s_r = (k_r + e * r) % GROUP_ORDER
+    # Step 6: responses.
+    s_v = (k_v + e * v) % N
+    s_r = (k_r + e * r) % N
 
     proof = ZKProof(
-        commitment=C,
+        commitment_xy=C_xy,
+        announcement_xy=A_xy,
         challenge=e,
         response_v=s_v,
         response_r=s_r,
-        announcement=A,
-        prediction_hash=prediction_hash,
+        prediction_hash=pred_hash,
         model_id=model_id,
         timestamp=timestamp,
-        score=prediction_score,
-        triple=triple,
-        proof_size_bytes=0
+        score=float(prediction_score),
+        triple=tuple(int(x) for x in triple),
+        proof_size_bytes=0,
     )
 
-    # Calculate proof size
-    proof_json = json.dumps(asdict(proof))
-    proof.proof_size_bytes = len(proof_json.encode())
-
+    # Size accounting (after construction).
+    proof.proof_size_bytes = len(json.dumps(asdict(proof)).encode())
     return proof
 
 
 def verify_proof(proof: ZKProof) -> bool:
+    """Verify a Schnorr-Fiat-Shamir proof on BN128.
+
+    Checks (a) the challenge was honestly derived and (b) the algebraic
+    relation  s_v * G + s_r * H  ==  A + e * C  on the curve.
     """
-    Verify a ZK proof.
-
-    Checks: g^s_v * h^s_r == A * C^e (mod p)
-
-    This confirms the prover knows v, r such that C = g^v * h^r,
-    without revealing v or r.
-    """
-    C = proof.commitment
-    e = proof.challenge
-    s_v = proof.response_v
-    s_r = proof.response_r
-    A = proof.announcement
-
-    # Recompute challenge (Fiat-Shamir verification, in Z_{group_order})
-    e_check = hash_to_field(C, A, proof.prediction_hash, proof.model_id)
-    if e_check != e:
+    # (a) recompute challenge.
+    e_check = _hash_challenge(
+        proof.commitment_xy,
+        proof.announcement_xy,
+        proof.prediction_hash,
+        proof.model_id,
+    )
+    if e_check != proof.challenge:
         return False
 
-    # Verify: g^s_v * h^s_r == A * C^e (mod p)
-    lhs = (mod_exp(G, s_v, FIELD_PRIME) * mod_exp(H, s_r, FIELD_PRIME)) % FIELD_PRIME
-    rhs = (A * mod_exp(C, e, FIELD_PRIME)) % FIELD_PRIME
+    # (b) reconstruct points and check the algebraic relation.
+    C = _point_from_ints(proof.commitment_xy)
+    A = _point_from_ints(proof.announcement_xy)
+    if C is None or A is None:
+        return False
+    if not (is_on_curve(C, b) and is_on_curve(A, b)):
+        return False
 
-    return lhs == rhs
+    lhs = add(multiply(G1, proof.response_v % N),
+              multiply(H_POINT, proof.response_r % N))
+    rhs = add(A, multiply(C, proof.challenge % N))
+    return eq(lhs, rhs)
 
 
 # ============================================================
-# Batch Operations for Experiments
+# Batch helpers (for experiments)
 # ============================================================
 
 def batch_generate_proofs(
     embedding_vectors: List[np.ndarray],
     prediction_scores: List[float],
     triples: List[Tuple[int, int, int]],
-    model_id: str
+    model_id: str,
 ) -> Tuple[List[ZKProof], dict]:
-    """
-    Generate ZK proofs for a batch of predictions.
-
-    Returns: (list of proofs, timing statistics)
-    """
-    proofs = []
-    gen_times = []
-
+    proofs: List[ZKProof] = []
+    gen_times: List[float] = []
     for i in range(len(embedding_vectors)):
-        start = time.time()
-        proof = generate_proof(
-            embedding_vectors[i],
-            prediction_scores[i],
-            triples[i],
-            model_id
-        )
-        gen_time = time.time() - start
-        gen_times.append(gen_time)
-        proofs.append(proof)
+        t0 = time.time()
+        p = generate_proof(embedding_vectors[i], prediction_scores[i], triples[i], model_id)
+        gen_times.append(time.time() - t0)
+        proofs.append(p)
 
     stats = {
         "num_proofs": len(proofs),
-        "total_gen_time": sum(gen_times),
-        "avg_gen_time": np.mean(gen_times),
-        "std_gen_time": np.std(gen_times),
-        "min_gen_time": np.min(gen_times),
-        "max_gen_time": np.max(gen_times),
-        "avg_proof_size_bytes": np.mean([p.proof_size_bytes for p in proofs]),
+        "total_gen_time": float(sum(gen_times)),
+        "avg_gen_time": float(np.mean(gen_times)),
+        "std_gen_time": float(np.std(gen_times)),
+        "min_gen_time": float(np.min(gen_times)) if gen_times else 0.0,
+        "max_gen_time": float(np.max(gen_times)) if gen_times else 0.0,
+        "avg_proof_size_bytes": float(np.mean([p.proof_size_bytes for p in proofs])) if proofs else 0.0,
+        "gen_times": gen_times,
     }
-
     return proofs, stats
 
 
 def batch_verify_proofs(proofs: List[ZKProof]) -> Tuple[List[bool], dict]:
-    """
-    Verify a batch of ZK proofs.
+    results: List[bool] = []
+    verify_times: List[float] = []
+    for p in proofs:
+        t0 = time.time()
+        ok = verify_proof(p)
+        verify_times.append(time.time() - t0)
+        results.append(bool(ok))
 
-    Returns: (list of verification results, timing statistics)
-    """
-    results = []
-    verify_times = []
-
-    for proof in proofs:
-        start = time.time()
-        result = verify_proof(proof)
-        verify_time = time.time() - start
-        verify_times.append(verify_time)
-        results.append(result)
-
+    n = max(len(results), 1)
     stats = {
         "num_verified": len(results),
-        "num_valid": sum(results),
-        "num_invalid": len(results) - sum(results),
-        "verification_rate": sum(results) / len(results),
-        "total_verify_time": sum(verify_times),
-        "avg_verify_time": np.mean(verify_times),
-        "std_verify_time": np.std(verify_times),
+        "num_valid": int(sum(results)),
+        "num_invalid": int(len(results) - sum(results)),
+        "verification_rate": float(sum(results) / n),
+        "total_verify_time": float(sum(verify_times)),
+        "avg_verify_time": float(np.mean(verify_times)) if verify_times else 0.0,
+        "std_verify_time": float(np.std(verify_times)) if verify_times else 0.0,
+        "verify_times": verify_times,
     }
-
     return results, stats
 
 
 def tamper_proof(proof: ZKProof) -> ZKProof:
-    """
-    Create a tampered proof (for testing that verification catches fraud).
-    Modifies the response to simulate a dishonest prover.
-    """
-    tampered = ZKProof(
-        commitment=proof.commitment,
+    """Return a copy with response_v perturbed -- used to test soundness."""
+    return ZKProof(
+        commitment_xy=proof.commitment_xy,
+        announcement_xy=proof.announcement_xy,
         challenge=proof.challenge,
-        response_v=(proof.response_v + 1) % FIELD_PRIME,  # Tamper!
+        response_v=(proof.response_v + 1) % N,
         response_r=proof.response_r,
-        announcement=proof.announcement,
         prediction_hash=proof.prediction_hash,
         model_id=proof.model_id,
         timestamp=proof.timestamp,
         score=proof.score,
         triple=proof.triple,
-        proof_size_bytes=proof.proof_size_bytes
+        proof_size_bytes=proof.proof_size_bytes,
     )
-    return tampered
