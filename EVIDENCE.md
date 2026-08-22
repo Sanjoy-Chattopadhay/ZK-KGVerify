@@ -26,6 +26,41 @@ Intel Core i5-13450HX, 24 GB RAM, Windows 11, PyTorch 2.11.0+cu128.
 The deploy gas is the quickest way to tell the two contracts apart: V1 (which
 does not verify) costs 545,765; V2 costs 1,325,277.
 
+### Independently exported from Etherscan
+
+[`docs/etherscan_export_sepolia.csv`](docs/etherscan_export_sepolia.csv) is
+the transaction list for this contract, exported from Etherscan rather than
+produced by our code. It is worth reading as a cross-check, because nothing in
+it passed through our tooling.
+
+| | |
+|---|---|
+| Transactions | 32 — 30 `verifyAndLog`, 1 `registerModel`, 1 contract creation |
+| Status | **Success on all 32.** No reverts, no retries |
+| Blocks | 11,542,020 → 11,542,051 — 32 consecutive blocks, one transaction each |
+| Window | 2026-08-22 09:03:00 → 09:09:48 UTC (6 min 48 s) |
+| Total fees | 0.02298617 ETH (testnet) |
+
+Etherscan shows the method column as raw selectors because the source is not
+verified on its site. They decode against `ZKKGVerifyV2.sol` as:
+
+| Selector | Function |
+|---|---|
+| `0xb43e985b` | `verifyAndLog(string,uint256[3],int256,uint256[2],uint256,uint256,bytes32)` |
+| `0x20a954a8` | `registerModel(string,uint256[2],bytes32)` |
+| `0x60806040` | contract creation (EVM initialisation prefix, not a selector) |
+
+Reproduce that mapping yourself — it is the first four bytes of the Keccak-256
+hash of each signature:
+
+```bash
+python -c "from eth_utils import keccak; print('0x'+keccak(text='verifyAndLog(string,uint256[3],int256,uint256[2],uint256,uint256,bytes32)')[:4].hex())"
+```
+
+That 30 records landed in 30 consecutive blocks with zero failures is the
+practical claim behind the latency figure: every proof the prover submitted
+was accepted by the EVM on first presentation.
+
 ### Verify it yourself, without us
 
 ```bash
