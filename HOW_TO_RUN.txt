@@ -1,183 +1,164 @@
-================================================================
-  ZK-KGVerify: How to Run
-================================================================
+ZK-KGVerify — how to run everything
+===================================
 
-PAPER TITLE:
-  "ZK-KGVerify: Privacy-Preserving Verification of Knowledge
-   Graph Reasoning using Zero-Knowledge Proofs and Blockchain"
+TL;DR
+-----
+    pip install -r requirements.txt
+    python run_all.py --private-key 0xYOUR_SEPOLIA_TESTNET_KEY
 
-================================================================
-  OPTION A: Run on Google Colab (RECOMMENDED)
-================================================================
+That is the only input needed. An RPC endpoint is chosen automatically from a
+list of public Sepolia nodes, the contract is compiled and deployed, the model
+is registered on-chain, proofs are generated from real model predictions,
+every proof is verified inside the EVM, and every number quoted in the paper
+is regenerated into results/.
 
-1. Go to https://colab.research.google.com
 
-2. Upload the entire project folder to Google Drive:
-   - Upload the folder "new-blockchain-paper" to your Google Drive
+BEFORE YOU START
+----------------
+1. Use a THROWAWAY account. Create a fresh account in MetaMask, and put only
+   free Sepolia testnet ETH in it. Never use a key that holds mainnet funds.
 
-3. Open the notebook:
-   - In Colab, click File > Open Notebook > Google Drive
-   - Navigate to: new-blockchain-paper/ZK_KGVerify.ipynb
+   The key is never printed, never logged, and never written to disk. The
+   secret commitment opening is stripped from results before anything is
+   saved.
 
-4. Set GPU runtime:
-   - Click Runtime > Change runtime type > T4 GPU > Save
+2. Fund it (free, takes a minute):
+       https://sepoliafaucet.com
+       https://www.alchemy.com/faucets/ethereum-sepolia
+       https://faucet.quicknode.com/ethereum/sepolia
 
-5. Check PROJECT_PATH in the first code cell:
-   - Default is: /content/drive/MyDrive/new-blockchain-paper
-   - Change it if your folder is in a different location
+   You need roughly 0.05 Sepolia ETH for 30 records plus deployment.
+   The script refuses to start with a zero balance and tells you where to go.
 
-6. Click Runtime > Run All
+3. Export the key to your MetaMask account:
+       MetaMask -> account menu -> Account details -> Show private key
 
-7. Wait ~30-40 minutes. All results will be in ./results/
+   You can pass it on the command line or set it in the environment:
 
-================================================================
-  OPTION B: Run Locally (Python Script)
-================================================================
+       PowerShell:  $env:SEPOLIA_PRIVATE_KEY = "0x..."
+       bash:        export SEPOLIA_PRIVATE_KEY=0x...
 
-Prerequisites:
-  - Python 3.8+
-  - NVIDIA GPU with CUDA (optional, CPU works but slower)
 
-Steps:
+CHECK IT WORKS FIRST (no key, no money, ~2 minutes)
+---------------------------------------------------
+    python run_all.py --profile smoke --stages selftest,local-evm
 
-1. Open terminal in the project folder:
+This runs the cryptographic self-tests and deploys the contract to an
+in-memory EVM, verifying honest proofs and rejecting every adversary class.
+If this passes, the on-chain path will work.
 
-   cd D:\Projects\new-blockchain-paper
 
-2. Create virtual environment (recommended):
+PROFILES
+--------
+  --profile smoke   ~2 min, CPU. End-to-end sanity check, 3 on-chain records.
+  --profile fast    ~1-2 h, CPU. Reduced epochs. Real numbers, not paper-grade.
+  --profile paper   Full protocol. NEEDS A GPU. This is the Colab config:
+                    4 models x 2 datasets, 200 epochs, full test sets,
+                    1000 proofs, 30 on-chain records.
 
-   python -m venv venv
-   venv\Scripts\activate        (Windows)
-   source venv/bin/activate     (Linux/Mac)
+On a CPU-only machine the 'paper' profile will take many hours of training.
+Run training on Colab (T4 is enough), then bring the checkpoints back and run
+only the on-chain stage locally — see "SPLITTING THE WORK" below.
 
-3. Install dependencies:
 
-   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-   pip install -r requirements.txt
+STAGES
+------
+Everything except 'sepolia' runs without a private key.
 
-   NOTE: torch-scatter, torch-sparse, torch-geometric are NOT
-   needed. CompGCN and R-GCN use custom implementations.
+    selftest   crypto self-tests: binding, vacuity, completeness,
+               soundness (6 adversaries), HVZK
+    local-evm  deploy + verify on an in-memory EVM; measures gas
+    train      train and evaluate the KG embedding models
+    zkp        proof benchmark on real model embeddings
+    sepolia    deploy to Sepolia, register the model, submit records
+    report     figures, LaTeX tables, and paper macros
 
-4. Run the full pipeline:
+Run a subset:
+    python run_all.py --stages selftest,local-evm,train,zkp,report
+    python run_all.py --private-key 0x... --stages sepolia,report
 
-   python run.py
+State carries across invocations, so a later `--stages report` still sees
+results produced by an earlier run.
 
-5. Results will be saved in ./results/
 
-================================================================
-  OPTION C: Run Locally (Jupyter Notebook)
-================================================================
+SPLITTING THE WORK (recommended)
+--------------------------------
+Train on a GPU, submit from anywhere:
 
-1. Install Jupyter:
-   pip install jupyter
+  On Colab (GPU):
+      python run_all.py --profile paper --stages train,zkp,report
+      # then download checkpoints/ and results/
 
-2. Start Jupyter:
-   jupyter notebook
+  Locally (needs only the key):
+      python run_all.py --private-key 0x... --profile paper \
+             --stages sepolia,report
 
-3. Open ZK_KGVerify.ipynb
+Training checkpoints are reused automatically; pass --no-resume to retrain.
 
-4. Run all cells (Cell > Run All)
 
-================================================================
-  PROJECT STRUCTURE
-================================================================
+WHAT TO EXPECT ON-CHAIN
+-----------------------
+  - one deployment transaction
+  - one registerModel transaction (single-shot per model id)
+  - N verifyAndLog transactions, ~12 s apiece on Sepolia
 
-new-blockchain-paper/
-  |-- ZK_KGVerify.ipynb      # Main Colab notebook
-  |-- run.py                  # Quick-run Python script
-  |-- requirements.txt        # Python dependencies
-  |-- HOW_TO_RUN.txt          # This file
-  |
-  |-- configs/
-  |     |-- __init__.py       # (required for Python package import)
-  |     |-- config.py         # All hyperparameters (edit here)
-  |
-  |-- src/
-  |     |-- data_loader.py    # FB15k-237 dataset loading
-  |     |-- models.py         # TransE, RotatE, CompGCN, R-GCN
-  |     |-- trainer.py        # Training + evaluation loop
-  |     |-- zkp_module.py     # Pedersen commitments + ZK proofs
-  |     |-- blockchain_module.py  # Local blockchain simulation
-  |     |-- visualization.py  # Paper figures + LaTeX tables
-  |     |-- pipeline.py       # End-to-end orchestration
-  |
-  |-- results/                # Output directory (auto-created)
-  |     |-- training_curves.png
-  |     |-- metrics_comparison.png
-  |     |-- zkp_overhead.png
-  |     |-- blockchain_stats.png
-  |     |-- pipeline_timing.png
-  |     |-- tables.tex        # LaTeX tables (copy to paper)
-  |     |-- all_results.json  # Full numerical results
-  |
-  |-- data/                   # Dataset (auto-downloaded)
+Records are only created if the EVM itself validates the proof. An invalid
+proof reverts and produces no record — that is the point of the design.
 
-================================================================
-  WHAT GETS GENERATED
-================================================================
+If you re-run against the same contract, use --attach 0xADDRESS to skip
+redeployment. Registration is single-shot: re-running with the same model id
+and the same commitment is fine; a *different* commitment is refused, because
+allowing it would let a model be swapped after predictions were published.
 
-After running, you get these files in ./results/:
 
-FIGURES (for paper):
-  - training_curves.png     : Loss curves for all 4 models
-  - metrics_comparison.png  : Bar chart of MRR, Hits@1/3/10
-  - zkp_overhead.png        : Proof gen time, size, verify time
-  - blockchain_stats.png    : Gas costs and chain statistics
-  - pipeline_timing.png     : End-to-end timing breakdown
+VERIFYING SOMEONE ELSE'S RUN (no key needed)
+--------------------------------------------
+    python tools/fetch_onchain_log.py --address 0xCONTRACT
+        Rebuilds the complete audit log straight from the chain.
 
-TABLES (for paper):
-  - tables.tex              : LaTeX tables ready to paste into paper
-    - Table 1: Link prediction results
-    - Table 2: ZKP overhead analysis
-    - Table 3: Blockchain storage costs
+    python tools/check_onchain_parity.py --address 0xCONTRACT --model-id CompGCN
+        Confirms the deployed contract's generator and digest derivations
+        match this repository's, and that it rejects forged proofs.
 
-DATA:
-  - all_results.json        : All numerical results in JSON
 
-================================================================
-  CONFIGURATION (configs/config.py)
-================================================================
+TROUBLESHOOTING
+---------------
+"has 0 Sepolia ETH"
+    Fund the account at a faucet listed above.
 
-Key settings you can adjust:
+"No usable Sepolia RPC"
+    Public nodes rate-limit. Get a free Alchemy or Infura key and pass
+    --rpc https://eth-sepolia.g.alchemy.com/v2/YOUR_KEY
 
-  EMBEDDING_DIM = 128       # Embedding size (increase for better results)
-  NUM_EPOCHS = 40           # Training epochs (increase for better results)
-  BATCH_SIZE = 1024         # Training batch size
-  NUM_ZKP_SAMPLES = 1000    # Number of ZK proofs to generate
-  BLOCKCHAIN_MODE = "local" # "local" or "ethereum" (local is reliable)
+"nonce too low" / "already known"
+    Handled automatically: the client resyncs from the pending nonce once.
+    If it persists, wait for pending transactions to clear and re-run.
 
-For a quick test run, reduce:
-  NUM_EPOCHS = 5
-  NUM_ZKP_SAMPLES = 100
+"Generator mismatch between contract and src/zkp_module.py"
+    The deployed contract was compiled from different constants. Deploy a
+    fresh one (drop --attach).
 
-================================================================
-  TROUBLESHOOTING
-================================================================
+"Model is already registered with a different commitment"
+    Expected and deliberate. Use a new --model-id or deploy a new contract.
 
-Problem: torch-scatter/torch-sparse won't install
-Solution: These are optional. The code has custom GCN layers
-          that don't need them. Just skip those packages.
+solc download fails
+    py-solc-x fetches solc 0.8.20 on first use. Behind a proxy, install it
+    once manually:  python -c "import solcx; solcx.install_solc('0.8.20')"
 
-Problem: CUDA out of memory
-Solution: Reduce BATCH_SIZE to 512 or EMBEDDING_DIM to 64
-          in configs/config.py
 
-Problem: Dataset download fails
-Solution: Manually download FB15k-237 train.txt, valid.txt,
-          test.txt and place in ./data/FB15k-237/
+OUTPUTS
+-------
+    results/all_results.json          everything, one file
+    results/sepolia_log.json          on-chain records with gas and cost
+    results/onchain_verifier_test.json  local EVM verification + gas
+    results/zkp_benchmark.json        proof timings and soundness
+    results/link_prediction.json      MRR / Hits@K per model per dataset
+    results/paper_macros.tex          every paper number, as LaTeX macros
+    results/*.png, *.pdf              figures
+    results/table_*.tex               LaTeX tables
 
-Problem: eth-tester fails on Colab
-Solution: The code auto-falls back to PythonBlockchain.
-          No action needed.
+The manuscript reads paper_macros.tex directly, so regenerating results
+updates the paper. Check that nothing drifted:
 
-================================================================
-  ESTIMATED RUNTIMES
-================================================================
-
-Hardware          | Time
-------------------+----------
-Colab T4 GPU      | ~30-40 min
-Local GPU (RTX)   | ~20-30 min
-CPU only          | ~1-2 hours
-
-================================================================
+    python tools/check_paper_numbers.py \
+        --tex ../Submission_ClusterComputing/sn-article.tex

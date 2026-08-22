@@ -7,6 +7,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import time
+import os
+import sys
+
 from tqdm import tqdm
 
 
@@ -114,8 +117,17 @@ def train_model(model, train_loader, dataset, config, device="cpu"):
         # improve best_loss by at least es_min_delta. Only check after the
         # min-epochs warm-up so we don't kill RotatE/CompGCN during ramp.
         if es_enabled and (epoch + 1) >= es_min_epochs:
-            if best_loss - avg_loss > es_min_delta:
+            # Compare against the best loss seen so far, and always lower the
+            # bar when the loss drops. Previously best_loss only moved when an
+            # epoch beat it by the full min_delta, so a slow steady decline
+            # kept accumulating until it crossed the threshold and reset the
+            # counter -- a model creeping down by 1e-4 an epoch never
+            # plateaued and never stopped. That is what made RGCN run all 200
+            # epochs at ~108 s each.
+            improved = best_loss - avg_loss > es_min_delta
+            if avg_loss < best_loss:
                 best_loss = avg_loss
+            if improved:
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
@@ -157,7 +169,13 @@ def evaluate_model(model, dataset, config, device="cpu", max_eval=None):
         model.set_graph(edge_index, edge_type)
 
     test_triples = dataset.test_triples
-    true_triples = dataset.get_all_true_triples()
+
+    # Filtered protocol needs, for each (h, r), the set of tails known to be
+    # true. Indexing by (h, r) turns the inner filter into a lookup over the
+    # handful of true tails instead of a scan over all |E| entities -- the
+    # original form cost |T_test| x |E| Python set probes (~3e8 on FB15k-237)
+    # and dominated total runtime.
+    hr2t = dataset.get_hr_to_tails()
 
     # Subsample test set for speed (if max_eval is set)
     if max_eval is not None and len(test_triples) > max_eval:
@@ -167,23 +185,64 @@ def evaluate_model(model, dataset, config, device="cpu", max_eval=None):
     ranks = []
     eval_start = time.time()
 
-    for i in tqdm(range(len(test_triples)), desc="  Evaluating", leave=False):
-        h, r, t = test_triples[i].tolist()
+    # Colab and CI capture stderr to a file, not a terminal. tqdm then emits a
+    # NEW LINE per refresh instead of rewriting one -- ~7,000 lines per
+    # evaluation, which floods the notebook frontend until it stops responding
+    # and the run looks hung. Refresh sparsely when nobody is watching a TTY.
+    _bar_interval = 1.0 if sys.stderr.isatty() else float(
+        os.environ.get("ZKKG_PROGRESS_SECONDS", "30")
+    )
 
-        head_idx = torch.tensor([h], device=device)
-        rel_idx = torch.tensor([r], device=device)
+    # Score a block of test triples per call rather than one. predict()
+    # already accepts a batch of (head, relation) pairs and returns
+    # (batch, |E|), so this is the same arithmetic in the same order -- but
+    # 20,466 single-row GPU launches per dataset are latency-bound, and each
+    # one costs far more in dispatch than in floating point. The block size
+    # is what bounds memory: TransE materialises (batch, |E|, dim) floats
+    # internally, which is ~1.2 GB per 32 triples on FB15k-237 at dim 128,
+    # so 32 is chosen to fit a 6 GB card alongside the model. Override with
+    # ZKKG_EVAL_BATCH on a larger GPU.
+    block = int(os.environ.get("ZKKG_EVAL_BATCH", "32"))
+    heads_all = test_triples[:, 0].to(device)
+    rels_all = test_triples[:, 1].to(device)
+    tails_all = test_triples[:, 2].tolist()
+    hr_pairs = test_triples[:, [0, 1]].tolist()  # keyed into hr2t as tuples
 
-        # Get scores for all entities as tail
-        scores = model.predict(head_idx, rel_idx).squeeze(0)
+    for start in tqdm(range(0, len(test_triples), block), desc="  Evaluating",
+                      leave=False, mininterval=_bar_interval):
+        stop = min(start + block, len(test_triples))
+        rows = stop - start
 
-        # Filter: set scores of other true triples to -inf
-        for ent in range(dataset.num_entities):
-            if (h, r, ent) in true_triples and ent != t:
-                scores[ent] = float('-inf')
+        # (block, |E|) scores for every candidate tail.
+        # contiguous() so the flat index_fill_ below writes through to the
+        # same storage the ranks are then read from.
+        block_scores = model.predict(heads_all[start:stop], rels_all[start:stop]).contiguous()
+        num_entities = block_scores.size(1)
 
-        # Rank of the true tail
-        rank = (scores >= scores[t]).sum().item()
-        ranks.append(rank)
+        targets = torch.as_tensor(tails_all[start:stop], dtype=torch.long,
+                                  device=block_scores.device).unsqueeze(1)
+        target_scores = block_scores.gather(1, targets)
+
+        # Filter: mask every other known-true tail for each (h, r). Flatten
+        # the per-row masks into one index list so the whole block costs a
+        # single index_fill_ rather than one kernel per test triple.
+        flat = []
+        for row in range(rows):
+            others = hr2t.get(tuple(hr_pairs[start + row]))
+            if others:
+                base = row * num_entities
+                flat.extend(base + o for o in others)
+        if flat:
+            block_scores.view(-1).index_fill_(
+                0, torch.as_tensor(flat, dtype=torch.long, device=block_scores.device),
+                float("-inf"),
+            )
+        block_scores.scatter_(1, targets, target_scores)
+
+        # Rank of the true tail (1-based; ties counted pessimistically).
+        # One transfer per block, instead of a device sync per triple.
+        block_ranks = (block_scores >= target_scores).sum(dim=1)
+        ranks.extend(block_ranks.tolist())
 
     ranks = np.array(ranks, dtype=np.float32)
     eval_time = time.time() - eval_start

@@ -1,15 +1,24 @@
 """
-ZK-KGVerify: End-to-End Pipeline
+SUPERSEDED -- kept only to document the original pipeline. Use run_all.py.
 
-This is the main orchestration script that runs the full experiment:
-1. Load FB15k-237 dataset
-2. Train 4 KG embedding models (TransE, RotatE, CompGCN, R-GCN)
-3. Evaluate link prediction (MRR, Hits@1/3/10)
-4. Generate ZK proofs for predictions
-5. Verify proofs and test tamper detection
-6. Store verification results on blockchain
-7. Generate figures and tables for the paper
+This module orchestrated the first design, where a fresh Pedersen commitment
+was created for every prediction. That makes the proof vacuous: the prover
+chooses the committed value after seeing the query, so knowing the opening
+says nothing about any model (docs/THEORY.md, Proposition 2). It also logged
+through the V1 contract, which stores a `verified` boolean supplied by the
+caller rather than checking anything.
+
+Importing it raises, instead of running and producing numbers that look
+plausible but mean nothing.
 """
+
+raise ImportError(
+    "src.pipeline is superseded and intentionally disabled.\n"
+    "It implements the per-prediction commitment design, which is vacuous "
+    "(see docs/THEORY.md, Proposition 2), and logs via the unverified V1 "
+    "contract.\n"
+    "Use run_all.py instead:  python run_all.py --help"
+)
 
 import sys
 import os
@@ -127,7 +136,8 @@ def run_full_pipeline():
     train_loader = get_data_loaders(
         dataset,
         batch_size=BATCH_SIZE,
-        negative_sample_size=NEGATIVE_SAMPLE_SIZE
+        negative_sample_size=NEGATIVE_SAMPLE_SIZE,
+        device=DEVICE,
     )
 
     # ============================================================

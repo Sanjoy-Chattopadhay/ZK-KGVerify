@@ -16,15 +16,32 @@ class KGTriple:
         self.tail = tail
 
 
-class FB15k237Dataset:
-    """
-    FB15k-237 Knowledge Graph dataset loader.
-    Downloads and processes the dataset from PyTorch Geometric or loads from local files.
+class KGDataset:
+    """Loader for tab-separated link-prediction benchmarks.
+
+    Handles any dataset published as train/valid/test.txt with one
+    `head<TAB>relation<TAB>tail` triple per line. FB15k-237 is the primary
+    benchmark; WN18RR is included because it has a very different profile
+    (far fewer relations, much sparser, longer-tailed), which is what makes
+    it a meaningful second point rather than a repeat of the first.
     """
 
-    DATASET_URL = "https://raw.githubusercontent.com/villmow/datasets_knowledge_embedding/master/FB15k-237/"
+    BASE_URL = (
+        "https://raw.githubusercontent.com/villmow/"
+        "datasets_knowledge_embedding/master/"
+    )
 
-    def __init__(self, data_dir="./data"):
+    AVAILABLE = {
+        "FB15k-237": "FB15k-237/",
+        "WN18RR": "WN18RR/text/",
+    }
+
+    def __init__(self, name="FB15k-237", data_dir="./data"):
+        if name not in self.AVAILABLE:
+            raise ValueError(
+                f"Unknown dataset {name!r}; choose from {sorted(self.AVAILABLE)}"
+            )
+        self.name = name
         self.data_dir = data_dir
         self.entity2id = {}
         self.relation2id = {}
@@ -32,6 +49,7 @@ class FB15k237Dataset:
         self.id2relation = {}
         self.num_entities = 0
         self.num_relations = 0
+        self._hr2t = None
 
         self.train_triples = None
         self.valid_triples = None
@@ -40,26 +58,28 @@ class FB15k237Dataset:
         self._load_dataset()
 
     def _download_if_needed(self):
-        """Download FB15k-237 dataset files if not present."""
+        """Fetch train/valid/test splits if they are not already on disk."""
         os.makedirs(self.data_dir, exist_ok=True)
-        fb_dir = os.path.join(self.data_dir, "FB15k-237")
-        os.makedirs(fb_dir, exist_ok=True)
+        ds_dir = os.path.join(self.data_dir, self.name)
+        os.makedirs(ds_dir, exist_ok=True)
 
-        files = ["train.txt", "valid.txt", "test.txt"]
-        for fname in files:
-            fpath = os.path.join(fb_dir, fname)
+        base = self.BASE_URL + self.AVAILABLE[self.name]
+        for fname in ["train.txt", "valid.txt", "test.txt"]:
+            fpath = os.path.join(ds_dir, fname)
             if not os.path.exists(fpath):
                 import urllib.request
-                url = self.DATASET_URL + fname
-                print(f"Downloading {fname}...")
+
+                url = base + fname
+                print(f"Downloading {self.name}/{fname} ...")
                 urllib.request.urlretrieve(url, fpath)
                 print(f"  Saved to {fpath}")
 
-        return fb_dir
+        return ds_dir
 
     def _load_dataset(self):
         """Load and process the dataset."""
         fb_dir = self._download_if_needed()
+        self.dataset_dir = fb_dir
 
         # First pass: build entity and relation vocabularies from all splits
         all_entities = set()
@@ -89,10 +109,21 @@ class FB15k237Dataset:
         self.valid_triples = self._load_split(os.path.join(fb_dir, "valid.txt"))
         self.test_triples = self._load_split(os.path.join(fb_dir, "test.txt"))
 
-        print(f"Dataset loaded: {self.num_entities} entities, {self.num_relations} relations")
+        print(f"{self.name}: {self.num_entities} entities, {self.num_relations} relations")
         print(f"  Train: {len(self.train_triples)} triples")
         print(f"  Valid: {len(self.valid_triples)} triples")
         print(f"  Test:  {len(self.test_triples)} triples")
+
+    def stats(self):
+        """Summary row used for the dataset table in the paper."""
+        return {
+            "name": self.name,
+            "entities": self.num_entities,
+            "relations": self.num_relations,
+            "train": len(self.train_triples),
+            "valid": len(self.valid_triples),
+            "test": len(self.test_triples),
+        }
 
     def _load_split(self, filepath):
         """Load a dataset split and return as tensor of shape (N, 3)."""
@@ -118,9 +149,38 @@ class FB15k237Dataset:
             true_triples.add((h, r, t))
         return true_triples
 
+    def get_hr_to_tails(self):
+        """Map (head, relation) -> list of all known-true tails.
+
+        This is the index form of `get_all_true_triples` and is what the
+        filtered ranking protocol actually needs. Built once and cached,
+        because evaluation queries it for every test triple.
+        """
+        if getattr(self, "_hr2t", None) is None:
+            hr2t = {}
+            all_triples = torch.cat(
+                [self.train_triples, self.valid_triples, self.test_triples], dim=0
+            )
+            for h, r, t in all_triples.tolist():
+                hr2t.setdefault((h, r), []).append(t)
+            self._hr2t = hr2t
+        return self._hr2t
+
+
+class FB15k237Dataset(KGDataset):
+    """Backwards-compatible alias kept so older scripts keep working."""
+
+    def __init__(self, data_dir="./data"):
+        super().__init__(name="FB15k-237", data_dir=data_dir)
+
 
 class KGTrainDataset(Dataset):
-    """Dataset for training KG embeddings with negative sampling."""
+    """Dataset for training KG embeddings with negative sampling.
+
+    Kept for scripts that build a torch DataLoader themselves. Training goes
+    through KGBatchLoader below, which is the same sampling done per batch
+    instead of per triple.
+    """
 
     def __init__(self, triples, num_entities, negative_sample_size=64):
         self.triples = triples
@@ -140,20 +200,54 @@ class KGTrainDataset(Dataset):
         return head, relation, tail, negative_samples
 
 
-def get_data_loaders(dataset, batch_size=1024, negative_sample_size=64):
+class KGBatchLoader:
+    """Shuffled batches of (head, relation, tail, negatives), sampled in bulk.
+
+    The per-triple Dataset above, wrapped in a DataLoader, drew its 64
+    negatives with a separate ``torch.randint`` call for each of the 272,115
+    training triples and then had default_collate stack 1024 single-element
+    tensors back into every batch. That is ~150 ms of Python and memcpy per
+    batch against ~2 ms of arithmetic, so training ran at roughly a
+    fiftieth of what the GPU could do and the profile that should take an
+    hour took most of a day.
+
+    Sampling the whole batch in one call gives the same distribution --
+    negatives are still i.i.d. uniform over entities, triples are still
+    reshuffled every epoch -- with one kernel per batch instead of 1024.
+    Holding the triples on the training device also removes a host-to-device
+    copy per batch; the tensors are a few MB.
+    """
+
+    def __init__(self, triples, num_entities, batch_size=1024,
+                 negative_sample_size=64, device=None):
+        self.device = device or "cpu"
+        self.triples = triples.to(self.device)
+        self.num_entities = num_entities
+        self.batch_size = batch_size
+        self.negative_sample_size = negative_sample_size
+
+    def __len__(self):
+        return (len(self.triples) + self.batch_size - 1) // self.batch_size
+
+    def __iter__(self):
+        order = torch.randperm(len(self.triples), device=self.device)
+        for start in range(0, len(order), self.batch_size):
+            idx = order[start:start + self.batch_size]
+            batch = self.triples[idx]
+            negatives = torch.randint(
+                0, self.num_entities,
+                (len(idx), self.negative_sample_size),
+                device=self.device,
+            )
+            yield batch[:, 0], batch[:, 1], batch[:, 2], negatives
+
+
+def get_data_loaders(dataset, batch_size=1024, negative_sample_size=64, device=None):
     """Create data loaders for training and evaluation."""
-    train_dataset = KGTrainDataset(
+    return KGBatchLoader(
         dataset.train_triples,
         dataset.num_entities,
-        negative_sample_size
-    )
-
-    train_loader = DataLoader(
-        train_dataset,
         batch_size=batch_size,
-        shuffle=True,
-        num_workers=0,
-        drop_last=False
+        negative_sample_size=negative_sample_size,
+        device=device,
     )
-
-    return train_loader

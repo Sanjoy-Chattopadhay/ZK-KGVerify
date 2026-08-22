@@ -1,0 +1,29 @@
+{
+  "timestamp": "2026-08-22T11:21:52",
+  "env": {
+    "python": "3.13.3",
+    "platform": "Windows-11-10.0.26200-SP0"
+  },
+  "device": {
+    "device": "cuda",
+    "torch": "2.11.0+cu128",
+    "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU",
+    "vram_gb": 6.0
+  },
+  "solc": {
+    "solc": "0.8.20"
+  },
+  "data": {
+    "FB15k-237": 272115,
+    "WN18RR": 86835
+  },
+  "zkp": {
+    "gen_ms": 23.067426681518555,
+    "verify_ms": 34.34176445007324
+  },
+  "training": {
+    "per_step_s": 0.01109002431233724,
+    "steps_per_epoch": 266,
+    "epoch_s": 2.949946467081706
+  }
+}

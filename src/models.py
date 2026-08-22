@@ -269,19 +269,47 @@ class CompGCN(nn.Module):
 
         self.edge_index = None
         self.edge_type = None
+        self._encoded = None
 
     def set_graph(self, edge_index, edge_type):
         """Set the graph structure for message passing."""
         self.edge_index = edge_index
         self.edge_type = edge_type
+        self._encoded = None
+
+    def train(self, mode=True):
+        # Any return to training invalidates the frozen encoding below.
+        self._encoded = None
+        return super().train(mode)
+
+    def _apply(self, *args, **kwargs):
+        # .to()/.cuda()/.float() rebuild the parameters; a cached encoding
+        # would still point at the old tensors, on the old device.
+        self._encoded = None
+        return super()._apply(*args, **kwargs)
 
     def encode(self):
         """Run GCN encoding to get entity and relation embeddings."""
+        # Message passing over the whole train graph (272k edges on
+        # FB15k-237) is by far the most expensive thing this model does, and
+        # its result is a pure function of the weights. predict() calls it,
+        # and evaluation calls predict() once per test triple -- so a full
+        # test set re-ran the graph convolution 20,466 times per dataset, and
+        # the ZKP stage another 2,000 times. That is what turned a one-hour
+        # run into one that never finished. Once the weights are frozen
+        # (eval mode, no grad) the output cannot change, so compute it once.
+        frozen = not self.training and not torch.is_grad_enabled()
+        if frozen and self._encoded is not None:
+            return self._encoded
+
         entity_emb = self.entity_embeddings.weight
         relation_emb = self.relation_embeddings.weight
 
         for layer in self.layers:
             entity_emb, relation_emb = layer(entity_emb, relation_emb, self.edge_index, self.edge_type)
+
+        if frozen:
+            self._encoded = (entity_emb, relation_emb)
 
         return entity_emb, relation_emb
 
@@ -403,15 +431,34 @@ class RGCN(nn.Module):
 
         self.edge_index = None
         self.edge_type = None
+        self._encoded = None
 
     def set_graph(self, edge_index, edge_type):
         self.edge_index = edge_index
         self.edge_type = edge_type
+        self._encoded = None
+
+    def train(self, mode=True):
+        self._encoded = None
+        return super().train(mode)
+
+    def _apply(self, *args, **kwargs):
+        self._encoded = None
+        return super()._apply(*args, **kwargs)
 
     def encode(self):
+        # Same caching as CompGCN.encode -- see the note there. R-GCN is the
+        # more expensive of the two, at ~108 s per epoch on FB15k-237.
+        frozen = not self.training and not torch.is_grad_enabled()
+        if frozen and self._encoded is not None:
+            return self._encoded
+
         entity_emb = self.entity_embeddings.weight
         for layer in self.layers:
             entity_emb = layer(entity_emb, self.edge_index, self.edge_type)
+
+        if frozen:
+            self._encoded = entity_emb
         return entity_emb
 
     def score_fn(self, head, relation, tail):

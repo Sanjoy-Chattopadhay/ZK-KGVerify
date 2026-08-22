@@ -1,107 +1,56 @@
 """
-Sepolia Deployment Module for ZK-KGVerify.
+Ethereum Sepolia backend for ZK-KGVerify.
 
-Deploys ZKKGVerify.sol to the Ethereum Sepolia testnet, then logs
-verification records on-chain and captures *real* gas measurements
-that can be reported in the paper alongside (or instead of) the
-simulated Python-blockchain numbers.
+Deploys the audit contract, submits verification records, and captures the
+gas / cost / latency measurements reported in the paper.
 
-Environment variables (read at runtime):
-    SEPOLIA_RPC_URL   -- e.g. https://sepolia.infura.io/v3/<KEY>
-                          or  https://eth-sepolia.g.alchemy.com/v2/<KEY>
-                          or  https://rpc.sepolia.org   (public, slower)
-    SEPOLIA_PRIVATE_KEY  -- hex private key of the funded account
-                            (NEVER commit this; use a throwaway key for testnet)
+Two contracts are supported:
 
-Typical use
+  V1  ZKKGVerify.sol    -- `logVerification(...)` stores a `verified` flag the
+                           caller asserts. Kept because the published results
+                           were produced with it and must stay reproducible.
+  V2  ZKKGVerifyV2.sol  -- `verifyAndLog(...)` runs the Schnorr check inside
+                           the EVM via the bn128 precompiles and reverts on an
+                           invalid proof, so a stored record is an on-chain
+                           attestation rather than a claim.
+
+Credentials
 -----------
-    from src.sepolia_module import SepoliaBackend
-    sep = SepoliaBackend()
-    sep.deploy()                          # one-time, returns address
-    for proof, ok in zip(proofs, results):
-        sep.log_verification(proof, ok)
-    print(sep.summary())
-    sep.save_log("results/sepolia_log.json")
+Only a private key is strictly required; a public RPC endpoint is selected
+automatically if SEPOLIA_RPC_URL is unset.
+
+    SEPOLIA_PRIVATE_KEY  hex key of a Sepolia-funded account (throwaway only)
+    SEPOLIA_RPC_URL      optional; Infura/Alchemy endpoint if you have one
+
+Never point this at an account holding mainnet value. Sepolia ETH is free
+from public faucets.
 """
 
 from __future__ import annotations
 
-import os
-import json
-import time
 import hashlib
-from dataclasses import dataclass, field, asdict
+import json
+import os
+import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional
 
+from .solidity import compile_contract
 
-# ============================================================
-# Solidity source: kept inline so this module is self-contained,
-# but it is byte-identical (modulo whitespace) to contracts/ZKKGVerify.sol.
-# ============================================================
+# Public Sepolia endpoints, tried in order. None require an API key.
+PUBLIC_RPCS = [
+    "https://ethereum-sepolia-rpc.publicnode.com",
+    "https://sepolia.drpc.org",
+    "https://rpc.sepolia.org",
+    "https://1rpc.io/sepolia",
+]
 
-_CONTRACT_SOURCE = """
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
-
-contract ZKKGVerify {
-    struct VerificationRecord {
-        string modelId;
-        uint256 head;
-        uint256 relation;
-        uint256 tail;
-        int256 score;
-        bytes32 commitment;
-        bool verified;
-        bytes32 proofHash;
-        uint256 timestamp;
-    }
-    VerificationRecord[] public records;
-    uint256 public recordCount;
-    event VerificationLogged(
-        uint256 indexed recordId,
-        string modelId,
-        bool verified,
-        uint256 timestamp
-    );
-    function logVerification(
-        string memory _modelId,
-        uint256 _head,
-        uint256 _relation,
-        uint256 _tail,
-        int256 _score,
-        bytes32 _commitment,
-        bool _verified,
-        bytes32 _proofHash
-    ) public returns (uint256) {
-        records.push(VerificationRecord({
-            modelId: _modelId,
-            head: _head,
-            relation: _relation,
-            tail: _tail,
-            score: _score,
-            commitment: _commitment,
-            verified: _verified,
-            proofHash: _proofHash,
-            timestamp: block.timestamp
-        }));
-        uint256 recordId = recordCount;
-        recordCount++;
-        emit VerificationLogged(recordId, _modelId, _verified, block.timestamp);
-        return recordId;
-    }
-    function getRecord(uint256 _id) public view returns (VerificationRecord memory) {
-        require(_id < recordCount, "Record does not exist");
-        return records[_id];
-    }
-    function getRecordCount() public view returns (uint256) { return recordCount; }
-}
-"""
+CHAIN_ID = 11155111
 
 
 @dataclass
 class OnChainTx:
-    """A single on-chain log transaction's measured properties."""
     record_id: int
     tx_hash: str
     block_number: int
@@ -112,6 +61,7 @@ class OnChainTx:
     verified: bool
     triple: list
     model_id: str
+    status: int = 1
 
 
 @dataclass
@@ -121,137 +71,226 @@ class DeploymentInfo:
     deploy_block: int
     deploy_gas_used: int
     deploy_cost_wei: int
+    contract_version: str
 
 
 class SepoliaBackend:
-    """Real-chain logger. Falls back to RuntimeError if env vars are missing
-    so the user is forced to supply credentials rather than silently mocking."""
+    """Live-chain deployer and logger."""
 
     def __init__(
         self,
         rpc_url: Optional[str] = None,
         private_key: Optional[str] = None,
-        chain_id: int = 11155111,  # Sepolia
-        solc_version: str = "0.8.20",
+        version: str = "v2",
+        chain_id: int = CHAIN_ID,
         max_priority_fee_gwei: float = 1.5,
     ):
-        self.rpc_url = rpc_url or os.environ.get("SEPOLIA_RPC_URL")
-        self.private_key = private_key or os.environ.get("SEPOLIA_PRIVATE_KEY")
-        if not self.rpc_url:
-            raise RuntimeError(
-                "SEPOLIA_RPC_URL is not set. Get a free key from "
-                "Infura/Alchemy or use https://rpc.sepolia.org and export it."
-            )
-        if not self.private_key:
-            raise RuntimeError(
-                "SEPOLIA_PRIVATE_KEY is not set. Export the hex private key "
-                "of a Sepolia-funded account (use a throwaway key)."
-            )
+        if version not in ("v1", "v2"):
+            raise ValueError("version must be 'v1' or 'v2'")
+        self.version = version
         self.chain_id = chain_id
-        self.solc_version = solc_version
         self.max_priority_fee_gwei = max_priority_fee_gwei
 
-        # Lazy imports so users that only run the local simulation don't pay.
-        from web3 import Web3
+        key = private_key or os.environ.get("SEPOLIA_PRIVATE_KEY")
+        if not key:
+            raise RuntimeError(
+                "No private key. Pass --private-key or set SEPOLIA_PRIVATE_KEY "
+                "to a throwaway Sepolia account (fund it at a public faucet)."
+            )
+        self.private_key = key if key.startswith("0x") else "0x" + key
+
         from eth_account import Account
+        from web3 import Web3
 
         self.Web3 = Web3
-        self.Account = Account
-        self.w3 = Web3(Web3.HTTPProvider(self.rpc_url, request_kwargs={"timeout": 60}))
-        if not self.w3.is_connected():
-            raise RuntimeError(f"Cannot connect to RPC {self.rpc_url}")
+        self.w3 = self._connect(rpc_url or os.environ.get("SEPOLIA_RPC_URL"))
         self.account = Account.from_key(self.private_key)
         self.address = self.account.address
 
-        self.abi = None
-        self.bytecode = None
+        self.abi, self.bytecode = self._load_contract()
         self.contract = None
         self.deployment: Optional[DeploymentInfo] = None
         self.log: List[OnChainTx] = []
-        # Locally tracked next-nonce so we don't refetch from a load-balanced
-        # RPC mid-batch (Alchemy/Infura have multiple nodes that lag by a tx).
+        # Nonce tracked locally: load-balanced RPCs can lag a transaction
+        # behind, and refetching mid-batch produces duplicate nonces.
         self._next_nonce: Optional[int] = None
 
-        bal_wei = self.w3.eth.get_balance(self.address)
-        print(f"[Sepolia] Connected as {self.address}")
-        print(f"[Sepolia] Balance: {self.w3.from_wei(bal_wei, 'ether'):.6f} ETH")
+        bal = self.w3.eth.get_balance(self.address)
+        self.starting_balance_wei = bal
+        print(f"[sepolia] account {self.address}")
+        print(f"[sepolia] balance {self.w3.from_wei(bal, 'ether'):.6f} ETH")
+        if bal == 0:
+            raise RuntimeError(
+                f"Account {self.address} has 0 Sepolia ETH. Fund it at "
+                "https://sepoliafaucet.com or https://www.alchemy.com/faucets/ethereum-sepolia "
+                "and re-run."
+            )
 
-    # ---------- compilation ----------
-    def _compile(self) -> None:
-        import solcx
-        try:
-            solcx.set_solc_version(self.solc_version)
-        except Exception:
-            solcx.install_solc(self.solc_version)
-            solcx.set_solc_version(self.solc_version)
+    # ---------- connection ----------
 
-        compiled = solcx.compile_source(
-            _CONTRACT_SOURCE,
-            output_values=["abi", "bin"],
-            solc_version=self.solc_version,
-            optimize=True,
-            optimize_runs=200,
-        )
-        _, iface = compiled.popitem()
-        self.abi = iface["abi"]
-        self.bytecode = iface["bin"]
+    def _connect(self, rpc_url: Optional[str]):
+        from web3 import Web3
 
-    # ---------- deployment ----------
+        candidates = [rpc_url] if rpc_url else PUBLIC_RPCS
+        errors = []
+        for url in candidates:
+            try:
+                w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": 60}))
+                if w3.is_connected() and w3.eth.chain_id == self.chain_id:
+                    print(f"[sepolia] rpc {url} (block {w3.eth.block_number:,})")
+                    return w3
+                errors.append(f"{url}: wrong chain or not connected")
+            except Exception as exc:  # noqa: BLE001 - fall through to next RPC
+                errors.append(f"{url}: {type(exc).__name__}: {exc}")
+        raise RuntimeError("No usable Sepolia RPC.\n  " + "\n  ".join(errors))
+
+    def _load_contract(self):
+        if self.version == "v2":
+            return compile_contract("ZKKGVerifyV2.sol", "ZKKGVerifyV2")
+        return compile_contract("ZKKGVerify.sol", "ZKKGVerify")
+
+    # ---------- transaction plumbing ----------
+
     def _get_nonce(self) -> int:
-        """Return the next nonce, using a locally tracked counter to avoid
-        load-balanced-RPC staleness. Initialised from the 'pending' tag so
-        any pre-existing pending tx on this account is respected."""
         if self._next_nonce is None:
             self._next_nonce = self.w3.eth.get_transaction_count(self.address, "pending")
         n = self._next_nonce
         self._next_nonce += 1
         return n
 
-    def deploy(self) -> DeploymentInfo:
-        if self.abi is None:
-            self._compile()
+    def _fee_fields(self) -> dict:
+        """EIP-1559 fees with headroom for base-fee drift between blocks."""
+        base = self.w3.eth.get_block("latest").get("baseFeePerGas", 0)
+        tip = self.w3.to_wei(self.max_priority_fee_gwei, "gwei")
+        return {"maxFeePerGas": base * 2 + tip, "maxPriorityFeePerGas": tip}
 
-        Contract = self.w3.eth.contract(abi=self.abi, bytecode=self.bytecode)
-        nonce = self._get_nonce()
-        gas_price = self.w3.eth.gas_price
-
-        tx = Contract.constructor().build_transaction({
-            "from": self.address,
-            "nonce": nonce,
-            "chainId": self.chain_id,
-            "gas": 2_500_000,
-            "maxFeePerGas": gas_price * 2,
-            "maxPriorityFeePerGas": self.w3.to_wei(self.max_priority_fee_gwei, "gwei"),
-        })
+    def _send(self, tx: dict, timeout: int = 300):
+        """Sign, send, and await a receipt, resyncing once on a nonce clash."""
         signed = self.account.sign_transaction(tx)
-        raw = signed.raw_transaction if hasattr(signed, "raw_transaction") else signed.rawTransaction
-        tx_hash = self.w3.eth.send_raw_transaction(raw)
-        print(f"[Sepolia] Deploy tx submitted: {tx_hash.hex()}  (waiting for receipt...)")
+        raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+        t0 = time.time()
+        try:
+            tx_hash = self.w3.eth.send_raw_transaction(raw)
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc).lower()
+            if "nonce" not in msg and "already known" not in msg:
+                raise
+            print(f"  [resync] {exc}; refetching nonce from 'pending'")
+            self._next_nonce = self.w3.eth.get_transaction_count(self.address, "pending")
+            tx["nonce"] = self._get_nonce()
+            signed = self.account.sign_transaction(tx)
+            raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+            tx_hash = self.w3.eth.send_raw_transaction(raw)
+        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=timeout)
+        return receipt, time.time() - t0
 
-        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
-        cost_wei = receipt.gasUsed * receipt.effectiveGasPrice
+    # ---------- deployment ----------
 
+    def deploy(self) -> DeploymentInfo:
+        Contract = self.w3.eth.contract(abi=self.abi, bytecode=self.bytecode)
+        tx = Contract.constructor().build_transaction(
+            {
+                "from": self.address,
+                "nonce": self._get_nonce(),
+                "chainId": self.chain_id,
+                "gas": 2_500_000,
+                **self._fee_fields(),
+            }
+        )
+        print(f"[sepolia] deploying {self.version} ...")
+        receipt, _ = self._send(tx)
+        if receipt.status != 1:
+            raise RuntimeError("Deployment transaction reverted.")
+
+        cost = receipt.gasUsed * receipt.effectiveGasPrice
         self.contract = self.w3.eth.contract(address=receipt.contractAddress, abi=self.abi)
         self.deployment = DeploymentInfo(
             contract_address=receipt.contractAddress,
-            deploy_tx=tx_hash.hex(),
+            deploy_tx=receipt.transactionHash.hex(),
             deploy_block=receipt.blockNumber,
             deploy_gas_used=receipt.gasUsed,
-            deploy_cost_wei=cost_wei,
+            deploy_cost_wei=cost,
+            contract_version=self.version,
         )
-        print(f"[Sepolia] Contract deployed at {receipt.contractAddress}")
-        print(f"[Sepolia] Deploy gas: {receipt.gasUsed:,}  "
-              f"cost: {self.w3.from_wei(cost_wei, 'ether'):.8f} ETH")
+        print(f"[sepolia] deployed at {receipt.contractAddress}")
+        print(
+            f"[sepolia] deploy gas {receipt.gasUsed:,}  "
+            f"cost {self.w3.from_wei(cost, 'ether'):.8f} ETH"
+        )
+        print(f"[sepolia] etherscan https://sepolia.etherscan.io/address/{receipt.contractAddress}")
         return self.deployment
 
-    # ---------- attach (skip redeploy on re-runs) ----------
     def attach(self, contract_address: str) -> None:
-        if self.abi is None:
-            self._compile()
-        self.contract = self.w3.eth.contract(address=contract_address, abi=self.abi)
-        print(f"[Sepolia] Attached to existing contract at {contract_address}")
+        addr = self.Web3.to_checksum_address(contract_address)
+        if len(self.w3.eth.get_code(addr)) == 0:
+            raise RuntimeError(f"No contract code at {addr} on Sepolia.")
+        self.contract = self.w3.eth.contract(address=addr, abi=self.abi)
+        print(f"[sepolia] attached to {addr}")
 
-    # ---------- per-proof logging ----------
+    # ---------- parity check ----------
+
+    def assert_generator_parity(self) -> None:
+        """Fail fast if the deployed contract's H differs from the local one.
+
+        A mismatch would make every locally generated proof fail on-chain for
+        a reason that looks like a crypto bug, so it is worth one call.
+        """
+        if self.version != "v2":
+            return
+        from .zkp_module import H_X, H_Y
+
+        _, _, hx, hy = self.contract.functions.generators().call()
+        if (hx, hy) != (H_X, H_Y):
+            raise RuntimeError(
+                "Generator mismatch between contract and src/zkp_module.py.\n"
+                f"  contract H = ({hx}, {hy})\n"
+                f"  python   H = ({H_X}, {H_Y})\n"
+                "The deployed contract was built from different constants; redeploy."
+            )
+        print("[sepolia] generator parity OK (contract H == python H)")
+
+    def assert_digest_parity(self, proof) -> None:
+        """Confirm Solidity and Python derive identical digests.
+
+        Both the prediction hash and the Fiat-Shamir challenge are checked.
+        A divergence here would surface later as every proof failing on-chain
+        for no visible reason, so it is worth two eth_calls before spending
+        gas on a batch.
+        """
+        if self.version != "v2":
+            return
+        from .zkp_module import hash_challenge
+
+        a = proof.solidity_args()
+
+        ph_on = self.contract.functions.predictionHash(
+            a["triple"], a["score"], a["aux"]
+        ).call()
+        if "0x" + ph_on.hex() != proof.prediction_hash:
+            raise RuntimeError(
+                f"predictionHash mismatch: contract=0x{ph_on.hex()} "
+                f"python={proof.prediction_hash}"
+            )
+
+        e_on = self.contract.functions.challenge(
+            a["C"], a["A"], bytes.fromhex(proof.prediction_hash[2:]), a["modelId"]
+        ).call()
+        e_off = hash_challenge(
+            proof.commitment_xy, proof.announcement_xy,
+            proof.prediction_hash, proof.model_id,
+        )
+        if e_on != e_off:
+            raise RuntimeError(
+                f"Challenge mismatch: contract={e_on} python={e_off}. "
+                "Fiat-Shamir encodings have diverged."
+            )
+        print("[sepolia] digest parity OK (predictionHash and challenge match)")
+
+    # Older name kept so existing scripts do not break.
+    assert_challenge_parity = assert_digest_parity
+
+    # ---------- record submission ----------
+
     @staticmethod
     def _commitment_bytes32(commitment_xy) -> bytes:
         x, y = commitment_xy
@@ -259,124 +298,180 @@ class SepoliaBackend:
 
     @staticmethod
     def _proof_bytes32(proof) -> bytes:
-        # bind the full Schnorr-Fiat-Shamir transcript into a single 32-byte digest
-        m = hashlib.sha256()
-        m.update(str(proof.commitment_xy).encode())
-        m.update(str(proof.announcement_xy).encode())
-        m.update(str(proof.challenge).encode())
-        m.update(str(proof.response_v).encode())
-        m.update(str(proof.response_r).encode())
-        m.update(proof.prediction_hash.encode())
-        m.update(proof.model_id.encode())
-        return m.digest()
+        return hashlib.sha256(proof.wire_bytes()).digest()
 
-    def log_verification(self, proof, verified: bool) -> OnChainTx:
+    def register_model(self, model_commitment) -> dict:
+        """Publish the model commitment that all later proofs must open.
+
+        Must happen before any record is submitted; the registration block
+        is what timestamps the owner's commitment to a specific set of
+        weights. Registration is single-shot per modelId on-chain, so a
+        repeat run against the same contract reuses the existing entry.
+        """
+        if self.version != "v2":
+            return {}
         if self.contract is None:
-            raise RuntimeError("Contract not deployed/attached. Call deploy() or attach() first.")
+            raise RuntimeError("Call deploy() or attach() first.")
 
-        nonce = self._get_nonce()
-        gas_price = self.w3.eth.gas_price
+        mid = model_commitment.model_id
+        if self.contract.functions.isRegistered(mid).call():
+            cx, cy, owner, at_block = self.contract.functions.modelCommitment(mid).call()
+            if (cx, cy) != tuple(model_commitment.commitment_xy):
+                raise RuntimeError(
+                    f"Model '{mid}' is already registered on this contract with a "
+                    f"different commitment (registered at block {at_block} by {owner}).\n"
+                    "Registration is deliberately single-shot -- re-registering would "
+                    "let an owner swap models after publishing predictions.\n"
+                    "Use a fresh --model-id, or deploy a new contract."
+                )
+            print(f"[sepolia] model '{mid}' already registered at block {at_block}")
+            return {"already_registered": True, "registered_at_block": at_block,
+                    "gas_used": 0}
 
-        score_i = int(round(proof.score * 1_000_000))
-        score_i = max(min(score_i, 2**255 - 1), -(2**255))  # clamp to int256
-
-        h, r, t = (int(x) for x in proof.triple)
-
-        fn = self.contract.functions.logVerification(
-            proof.model_id,
-            h, r, t,
-            score_i,
-            self._commitment_bytes32(proof.commitment_xy),
-            bool(verified),
-            self._proof_bytes32(proof),
+        fn = self.contract.functions.registerModel(
+            mid,
+            list(model_commitment.commitment_xy),
+            bytes.fromhex(model_commitment.weight_digest),
         )
+        tx = fn.build_transaction(
+            {
+                "from": self.address,
+                "nonce": self._get_nonce(),
+                "chainId": self.chain_id,
+                "gas": int(fn.estimate_gas({"from": self.address}) * 1.25),
+                **self._fee_fields(),
+            }
+        )
+        receipt, latency = self._send(tx)
+        if receipt.status != 1:
+            raise RuntimeError("registerModel reverted.")
+        print(f"[sepolia] registered model '{mid}'  gas={receipt.gasUsed:,}")
+        return {
+            "already_registered": False,
+            "tx_hash": receipt.transactionHash.hex(),
+            "block_number": receipt.blockNumber,
+            "gas_used": receipt.gasUsed,
+            "cost_wei": receipt.gasUsed * receipt.effectiveGasPrice,
+            "latency_s": latency,
+            "weight_digest": model_commitment.weight_digest,
+            "commitment_xy": list(model_commitment.commitment_xy),
+        }
 
-        # Estimate gas, build, sign, send.
+    def estimate_verify_gas(self, proof) -> Optional[int]:
+        """Gas for verification alone, with no storage write (V2 only)."""
+        if self.version != "v2":
+            return None
+        a = proof.solidity_args()
+        return self.contract.functions.verifyProof(
+            a["modelId"], a["triple"], a["score"], a["A"], a["sv"], a["sr"], a["aux"]
+        ).estimate_gas({"from": self.address})
+
+    def log_verification(self, proof, verified: bool = True) -> OnChainTx:
+        if self.contract is None:
+            raise RuntimeError("Call deploy() or attach() first.")
+
+        a = proof.solidity_args()
+        if self.version == "v2":
+            fn = self.contract.functions.verifyAndLog(
+                a["modelId"], a["triple"], a["score"],
+                a["A"], a["sv"], a["sr"], a["aux"],
+            )
+        else:
+            h, r, t = a["triple"]
+            fn = self.contract.functions.logVerification(
+                a["modelId"], h, r, t, a["score"],
+                self._commitment_bytes32(proof.commitment_xy),
+                bool(verified),
+                self._proof_bytes32(proof),
+            )
+
         try:
-            est_gas = fn.estimate_gas({"from": self.address}) + 20_000
-        except Exception:
-            est_gas = 250_000
+            gas = int(fn.estimate_gas({"from": self.address}) * 1.25)
+        except Exception as exc:  # noqa: BLE001
+            # For V2 a failing estimate means the chain rejected the proof.
+            if self.version == "v2":
+                raise RuntimeError(
+                    f"On-chain verification rejected this proof: {exc}"
+                ) from exc
+            gas = 300_000
 
-        tx = fn.build_transaction({
-            "from": self.address,
-            "nonce": nonce,
-            "chainId": self.chain_id,
-            "gas": est_gas,
-            "maxFeePerGas": gas_price * 2,
-            "maxPriorityFeePerGas": self.w3.to_wei(self.max_priority_fee_gwei, "gwei"),
-        })
-        signed = self.account.sign_transaction(tx)
-        raw = signed.raw_transaction if hasattr(signed, "raw_transaction") else signed.rawTransaction
-
-        t0 = time.time()
-        try:
-            tx_hash = self.w3.eth.send_raw_transaction(raw)
-        except Exception as e:
-            # Most common cause: load-balanced RPC node lag desyncs the nonce.
-            # Resync from 'pending' once and rebuild the tx with the fresh nonce.
-            if "nonce" not in str(e).lower():
-                raise
-            print(f"  [resync] nonce error ({e}); refetching from 'pending'...")
-            self._next_nonce = self.w3.eth.get_transaction_count(self.address, "pending")
-            nonce = self._get_nonce()
-            tx["nonce"] = nonce
-            signed = self.account.sign_transaction(tx)
-            raw = signed.raw_transaction if hasattr(signed, "raw_transaction") else signed.rawTransaction
-            tx_hash = self.w3.eth.send_raw_transaction(raw)
-        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
-        latency = time.time() - t0
-        cost = receipt.gasUsed * receipt.effectiveGasPrice
+        tx = fn.build_transaction(
+            {
+                "from": self.address,
+                "nonce": self._get_nonce(),
+                "chainId": self.chain_id,
+                "gas": gas,
+                **self._fee_fields(),
+            }
+        )
+        receipt, latency = self._send(tx, timeout=240)
 
         record = OnChainTx(
             record_id=len(self.log),
-            tx_hash=tx_hash.hex(),
+            tx_hash=receipt.transactionHash.hex(),
             block_number=receipt.blockNumber,
             gas_used=receipt.gasUsed,
             effective_gas_price_wei=receipt.effectiveGasPrice,
-            cost_wei=cost,
+            cost_wei=receipt.gasUsed * receipt.effectiveGasPrice,
             latency_s=latency,
             verified=bool(verified),
-            triple=[h, r, t],
+            triple=[int(x) for x in proof.triple],
             model_id=proof.model_id,
+            status=receipt.status,
         )
         self.log.append(record)
         return record
 
-    # ---------- summary stats ----------
+    # ---------- reporting ----------
+
     def summary(self) -> Dict[str, Any]:
         if not self.log:
-            return {"num_tx": 0}
-        gas = [tx.gas_used for tx in self.log]
-        cost_wei = [tx.cost_wei for tx in self.log]
-        lat = [tx.latency_s for tx in self.log]
-        total_cost_wei = sum(cost_wei)
+            return {"num_tx": 0, "contract_version": self.version}
+
+        import statistics as st
+
+        gas = [t.gas_used for t in self.log]
+        cost = [t.cost_wei for t in self.log]
+        lat = [t.latency_s for t in self.log]
+        steady = gas[1:] if len(gas) > 1 else gas
 
         deploy = asdict(self.deployment) if self.deployment else None
         if deploy:
-            deploy["deploy_cost_eth"] = float(self.w3.from_wei(deploy["deploy_cost_wei"], "ether"))
+            deploy["deploy_cost_eth"] = float(
+                self.w3.from_wei(deploy["deploy_cost_wei"], "ether")
+            )
 
         return {
             "network": "sepolia",
             "chain_id": self.chain_id,
+            "contract_version": self.version,
             "contract_address": self.contract.address if self.contract else None,
+            "account": self.address,
             "deployment": deploy,
             "num_tx": len(self.log),
-            "total_gas_used": int(sum(gas)),
-            "avg_gas_per_tx": float(sum(gas) / len(gas)),
-            "min_gas_per_tx": int(min(gas)),
-            "max_gas_per_tx": int(max(gas)),
-            "total_cost_wei": int(total_cost_wei),
-            "total_cost_eth": float(self.w3.from_wei(total_cost_wei, "ether")),
-            "avg_cost_per_tx_eth": float(self.w3.from_wei(total_cost_wei // max(len(self.log), 1), "ether")),
-            "avg_latency_s": float(sum(lat) / len(lat)),
+            "total_gas_used": sum(gas),
+            "avg_gas_per_tx": st.fmean(gas),
+            "first_tx_gas": gas[0],
+            "steady_state_avg_gas": st.fmean(steady),
+            "steady_state_std_gas": st.pstdev(steady) if len(steady) > 1 else 0.0,
+            "min_gas_per_tx": min(gas),
+            "max_gas_per_tx": max(gas),
+            "total_cost_wei": sum(cost),
+            "total_cost_eth": float(self.w3.from_wei(sum(cost), "ether")),
+            "avg_cost_per_tx_eth": float(self.w3.from_wei(sum(cost) // len(cost), "ether")),
+            "avg_latency_s": st.fmean(lat),
+            "median_latency_s": st.median(lat),
+            "all_tx_succeeded": all(t.status == 1 for t in self.log),
         }
 
-    def save_log(self, path: str) -> None:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
+    def save_log(self, path: str, extra: Optional[dict] = None) -> None:
         payload = {
             "summary": self.summary(),
-            "transactions": [asdict(tx) for tx in self.log],
+            "transactions": [asdict(t) for t in self.log],
         }
-        with open(path, "w") as f:
-            json.dump(payload, f, indent=2)
-        print(f"[Sepolia] Wrote {len(self.log)} tx records to {path}")
+        if extra:
+            payload["context"] = extra
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print(f"[sepolia] wrote {len(self.log)} records to {p}")

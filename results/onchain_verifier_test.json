@@ -1,0 +1,41 @@
+{
+  "backend": "eth-tester / py-evm (in-memory)",
+  "num_honest": 12,
+  "accepted_onchain": 12,
+  "records_stored": 12,
+  "registration": {
+    "gas": 138696,
+    "unregistered_refused": true,
+    "reregistration_rejected": true
+  },
+  "v1": {
+    "deploy_gas": 545765,
+    "log_gas_first": 271361,
+    "log_gas_steady_mean": 237031.18181818182,
+    "log_gas_steady_std": 167.28300363690605,
+    "verification": "none -- stores the caller's asserted boolean"
+  },
+  "v2": {
+    "deploy_gas": 1325277,
+    "register_gas": 138696,
+    "verify_gas_mean": 68869.0,
+    "verify_gas_min": 68632,
+    "verify_gas_max": 68992,
+    "log_gas_first": 281162,
+    "log_gas_steady_mean": 246827.81818181818,
+    "log_gas_steady_std": 164.20265648488825,
+    "verification": "chain-enforced Schnorr check against the registry"
+  },
+  "cost_of_trustlessness_gas": 9796.636363636353,
+  "cost_of_trustlessness_pct": 4.133058059488142,
+  "soundness": {
+    "A1_response_tamper": "8/8",
+    "A2_prediction_swap": "8/8",
+    "A3_score_inflation": "8/8",
+    "A4_commitment_swap": "off-chain: rejected 8/8; on-chain: not caller-supplied, ignored 8/8",
+    "A5_offcurve_point": "8/8",
+    "A6_unregistered_model": "8/8"
+  },
+  "invalid_proof_reverts": true,
+  "failures": []
+}
